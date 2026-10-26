@@ -27,7 +27,7 @@
 | 周期噪声 | `targets/.../world/LoopNoise.java` | 原版 Perlin/NormalNoise 的周期重采样：晶格索引按 `cells = round(Q·f)` 取模，八度振幅/频率与原版一致 |
 | 噪声注入 | `.../mixin/{NormalNoise,PerlinNoiseAccessor,RandomState,BlendedNoise,DensityFunctions*,Aquifer,SurfaceSystem}Mixin` | 给每个 `NormalNoise` 盖上维度周期；各密度节点按自己的输入单位压入周期；`BlendedNoise`、含水层与地表缩放调用单独折回 |
 | 生成器 | `.../world/SpatialLoopChunkGenerator.java` | `extends NoiseBasedChunkGenerator`；地形/生物群系/洞穴/地表全走原版，本类只折回结构、装饰、雕刻种子 |
-| 生物群系 | 原版 `multi_noise` | 气候噪声同样周期化；`BiomeManager` 的模糊查找与 `BIOME_INFO_NOISE` 计数也按周期折回 |
+| 生物群系 | 原版 `multi_noise` | 气候噪声同样周期化；`BiomeManager` 的模糊查找与 `BIOME_INFO_NOISE` 计数也按周期折回；`MultiNoiseBiomeSourceMixin` 把入口 quart 坐标折回，第三方群系模组（TerraBlender）的区域布局在副本间一致 |
 | 创建世界界面 | `.../mixin/{WorldTabMixin,WorldCreationUiStateMixin,CreateWorldScreenMixin}.java` | 滑条、状态、从原版 overworld 生成器取出 `biome_source`/`settings` 装配循环生成器 |
 | 视距 / 模拟距离 | `SpatialLoopViewDistance` + `ChunkMapMixin` + `DistanceManagerMixin` + 数据包 mixin | 加载、发送、渲染、实体刻一起收窄 |
 | 存档折回 | `ChunkStorageMixin` + `SimpleRegionStorageMixin` + `LoopChunkNbt` | 区块 / 实体 / POI 读写磁盘时按周期折回坐标，并平移方块实体、计划刻、实体位置、POI 记录、结构起点/引用 |

@@ -63,6 +63,25 @@ class LoopGeometryTest {
     }
 
     @Test
+    void quartPeriodMatchesTheBlockPeriod() {
+        for (int radius : new int[]{3, 12, 32, 128}) {
+            int quartPeriod = LoopGeometry.periodQuarts(radius);
+            assertEquals(LoopGeometry.periodBlocks(radius), quartPeriod * 4, "radius " + radius);
+            for (int quart = -50_000; quart <= 50_000; quart += 733) {
+                int wrappedQuart = Math.floorMod(quart, quartPeriod);
+                // 群系源入口折的是 quart 坐标，气候采样器再乘 4 变回方块坐标：
+                // 折回后的方块坐标必须与原坐标同余（mod 方块周期），否则群系会与地形错位。
+                assertEquals(
+                        0,
+                        Math.floorMod(LoopGeometry.wrapBlock(quart * 4, radius) - wrappedQuart * 4,
+                                LoopGeometry.periodBlocks(radius)),
+                        "radius " + radius + " quart " + quart
+                );
+            }
+        }
+    }
+
+    @Test
     void viewDistanceIsAlwaysStrictlyBelowRadius() {
         for (int radius = LoopGeometry.MIN_ACTIVE_RADIUS; radius <= LoopGeometry.MAX_RADIUS; radius++) {
             assertTrue(LoopGeometry.maxViewDistance(radius) < radius, "radius " + radius);

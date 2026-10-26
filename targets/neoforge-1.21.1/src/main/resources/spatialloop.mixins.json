@@ -20,6 +20,7 @@
     "DensityFunctionsWeirdScaledSamplerMixin",
     "DistanceManagerMixin",
     "MinecraftServerMixin",
+    "MultiNoiseBiomeSourceMixin",
     "NoiseBasedCountPlacementMixin",
     "NoiseThresholdCountPlacementMixin",
     "NormalNoiseMixin",

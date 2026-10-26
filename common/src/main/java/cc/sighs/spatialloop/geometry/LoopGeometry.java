@@ -40,6 +40,17 @@ public final class LoopGeometry {
         return periodChunks(radius) * CHUNK_SIZE;
     }
 
+    /**
+     * 方块周期换成 quart 周期（{@code QuartPos} 是 4 格一步），即 {@code 8r}。
+     *
+     * <p>{@code MultiNoiseBiomeSource#getNoiseBiome} 的输入是 quart 坐标，而 {@code Climate.Sampler}
+     * 又会把它换算回方块坐标（{@code QuartPos.toBlock}）再求值。要在方块坐标上保持 {@code 32r} 的周期，
+     * quart 输入就必须按 {@code 32r / 4 = 8r} 折回。
+     */
+    public static int periodQuarts(int radius) {
+        return periodBlocks(radius) / 4;
+    }
+
     public static int minChunk(int radius) {
         return -radius;
     }

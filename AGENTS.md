@@ -33,7 +33,11 @@ gradle/target-conventions/       各 target 共用的发布/资源约定
    不是 `NormalNoise` 的几处也要折回：`BlendedNoise`（`base_3d_noise`）、含水层的格子坐标噪声、
    `SurfaceSystem` 的缩放调用、按坐标取种子的随机工厂（矿脉/地表抖动，含水层用格子周期）、
    雕刻器种子（`LoopCarverSeed` + `WorldgenRandomMixin`）、`BiomeManager` 的模糊查找、
-   `BIOME_INFO_NOISE` 计数（`LoopFeatureNoise`）。新增噪声调用点先想清楚它的输入单位。
+   `BIOME_INFO_NOISE` 计数（`LoopFeatureNoise`）。群系源的**入口坐标**也要折（`MultiNoiseBiomeSourceMixin`，
+   quart 周期 = 方块周期 / 4 = `LoopGeometry.periodQuarts(r)`），因为 TerraBlender 这类模组在自己的
+   `@Inject` 里用入口 quart 坐标算区域哈希（`findValuePositional`）。Mixin 按优先级从高到低应用，
+   HEAD 处后应用的代码排在前面，所以本 mixin 用 `priority = 500`（**低于** TerraBlender 的默认
+   1000）才能让变量改写先于它的回调执行；用 2000 时实测它的回调反而先跑。新增噪声调用点先想清楚它的输入单位。
 2. **装饰必须走原版流程**：`applyBiomeDecoration` 按原版逻辑逐装饰步放结构 piece，再放生物群系
    generation settings 里的 placed feature，只把 `setDecorationSeed` 的坐标折回一个周期。不要改成
    自有装饰——那会把原版和其他模组注册的 feature 全部跳过。原版 feature 会读邻居区块、结果与生成顺序

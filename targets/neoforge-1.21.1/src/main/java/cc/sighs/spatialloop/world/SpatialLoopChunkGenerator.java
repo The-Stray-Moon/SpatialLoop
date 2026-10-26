@@ -93,6 +93,12 @@ public final class SpatialLoopChunkGenerator extends NoiseBasedChunkGenerator {
     public SpatialLoopChunkGenerator(BiomeSource biomeSource, Holder<NoiseGeneratorSettings> settings, int radius) {
         super(biomeSource, settings);
         this.radius = LoopGeometry.sanitizeRadius(radius);
+        // 群系源入口按 quart 周期折回：第三方群系模组（TerraBlender 等）用入口坐标算区域布局。
+        // TerraBlender 在 doCreateBiomes 的 fillBiomesFromNoise 处用 @ModifyArg 换成克隆的群系源，
+        // 而 MultiNoiseBiomeSource.clone() 走 Object.clone()，本字段会被一起复制过去。
+        if (this.biomeSource instanceof LoopBiomeSourcePeriod aware) {
+            aware.spatialloop$setPeriod(LoopGeometry.periodQuarts(this.radius));
+        }
         // 与原版 ChunkGenerator 完全一致：原版/模组注册进生物群系的 placed feature 都会参与排序和放置。
         this.featuresPerStep = Suppliers.memoize(() -> FeatureSorter.buildFeaturesPerStep(
                 List.copyOf(this.biomeSource.possibleBiomes()),
