@@ -10,9 +10,10 @@ import net.minecraft.nbt.IntArrayTag;
 import net.minecraft.nbt.IntTag;
 import net.minecraft.nbt.ListTag;
 import net.minecraft.nbt.Tag;
+import net.minecraft.world.level.ChunkPos;
 import org.junit.jupiter.api.Test;
 
-/** 存档 NBT 的坐标平移：格式错了就会把方块实体/实体/POI 留在别的周期里。 */
+/** 存档 NBT 的坐标平移：格式错了就会把方块实体/实体/POI/结构留在别的周期里。 */
 class LoopChunkNbtTest {
     @Test
     void chunkBlockEntitiesAndTicksMoveWithTheSlot() {
@@ -102,5 +103,59 @@ class LoopChunkNbtTest {
         assertEquals(71, moved.getInt(0));
         assertEquals(-60, moved.getInt(1));
         assertEquals(5, moved.getInt(2));
+    }
+
+    @Test
+    void structureStartsAndReferencesMoveWithTheSlot() {
+        CompoundTag tag = new CompoundTag();
+        CompoundTag structures = new CompoundTag();
+
+        CompoundTag start = new CompoundTag();
+        start.putInt("ChunkX", 100);
+        start.putInt("ChunkZ", 0);
+        CompoundTag piece = new CompoundTag();
+        ListTag box = new ListTag();
+        for (int value : new int[]{1600, -60, 0, 1615, -40, 15}) {
+            box.add(IntTag.valueOf(value));
+        }
+        piece.put("BB", box);
+        piece.putInt("TPX", 1600);
+        piece.putInt("TPZ", 0);
+        piece.putInt("PosX", 1600);
+        piece.putInt("PosZ", 0);
+        ListTag children = new ListTag();
+        children.add(piece);
+        start.put("Children", children);
+
+        CompoundTag starts = new CompoundTag();
+        starts.put("minecraft:village_plains", start);
+        structures.put("starts", starts);
+
+        CompoundTag references = new CompoundTag();
+        references.putLongArray("minecraft:village_plains", new long[]{ChunkPos.asLong(100, 0)});
+        structures.put("References", references);
+        tag.put("structures", structures);
+
+        LoopChunkNbt.rebase(tag, -96, 0);
+
+        CompoundTag moved = tag.getCompound("structures")
+                .getCompound("starts")
+                .getCompound("minecraft:village_plains");
+        assertEquals(4, moved.getInt("ChunkX"));
+        assertEquals(0, moved.getInt("ChunkZ"));
+
+        CompoundTag movedPiece = moved.getList("Children", Tag.TAG_COMPOUND).getCompound(0);
+        ListTag movedBox = movedPiece.getList("BB", Tag.TAG_INT);
+        assertEquals(64, movedBox.getInt(0));
+        assertEquals(0, movedBox.getInt(2));
+        assertEquals(79, movedBox.getInt(3));
+        assertEquals(15, movedBox.getInt(5));
+        assertEquals(64, movedPiece.getInt("TPX"));
+        assertEquals(64, movedPiece.getInt("PosX"));
+
+        assertEquals(
+                ChunkPos.asLong(4, 0),
+                tag.getCompound("structures").getCompound("References").getLongArray("minecraft:village_plains")[0]
+        );
     }
 }

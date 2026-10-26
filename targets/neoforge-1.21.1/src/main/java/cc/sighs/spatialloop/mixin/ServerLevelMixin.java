@@ -1,5 +1,7 @@
 package cc.sighs.spatialloop.mixin;
 
+import cc.sighs.spatialloop.geometry.LoopGeometry;
+import cc.sighs.spatialloop.world.LoopBiomeManager;
 import cc.sighs.spatialloop.world.LoopLevel;
 import cc.sighs.spatialloop.world.LoopRadiusRegistry;
 import cc.sighs.spatialloop.world.SpatialLoopChunkGenerator;
@@ -65,6 +67,11 @@ public abstract class ServerLevelMixin implements LoopLevel {
             this.spatialloop$loopRadius = generator.radius();
         }
         LoopRadiusRegistry.put(dimension, this.spatialloop$loopRadius);
+        if (this.spatialloop$loopRadius > 0) {
+            // 生物群系的模糊查找也要按周期折回，否则 feature 的 BiomeFilter / 地表规则在群系边界会差一格。
+            ((LoopBiomeManager) (Object) ((ServerLevel) (Object) this).getBiomeManager())
+                    .spatialloop$periodBlocks(LoopGeometry.periodBlocks(this.spatialloop$loopRadius));
+        }
     }
 
     @Override

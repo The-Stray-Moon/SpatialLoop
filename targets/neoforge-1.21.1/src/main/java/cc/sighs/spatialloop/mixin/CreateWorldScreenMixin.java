@@ -2,16 +2,12 @@ package cc.sighs.spatialloop.mixin;
 
 import cc.sighs.spatialloop.client.LoopRadiusHolder;
 import cc.sighs.spatialloop.geometry.LoopGeometry;
-import cc.sighs.spatialloop.terrain.LoopTerrain;
-import cc.sighs.spatialloop.world.SpatialLoopBiomes;
 import cc.sighs.spatialloop.world.SpatialLoopChunkGenerator;
-import java.util.List;
 import net.minecraft.client.gui.screens.worldselection.CreateWorldScreen;
 import net.minecraft.client.gui.screens.worldselection.WorldCreationUiState;
-import net.minecraft.core.Holder;
-import net.minecraft.world.level.biome.Biome;
-import net.minecraft.world.level.dimension.DimensionType;
+import net.minecraft.core.RegistryAccess;
 import net.minecraft.world.level.dimension.LevelStem;
+import net.minecraft.world.level.levelgen.NoiseBasedChunkGenerator;
 import net.minecraft.world.level.levelgen.WorldDimensions;
 import org.spongepowered.asm.mixin.Final;
 import org.spongepowered.asm.mixin.Mixin;
@@ -27,6 +23,10 @@ import org.spongepowered.asm.mixin.injection.callback.CallbackInfo;
  * <p>替换发生在 {@code onCreate} 的第一行：此时界面状态尚未被烘焙成 {@code WorldDimensions}，
  * 换成自定义生成器后它会随 level.dat 一起保存，读档时由生成器的 codec 原样还原，
  * 半径因此是「存档属性」而不是配置文件。
+ *
+ * <p>地形本身用原版 {@code NoiseBasedChunkGenerator} 的生物群系源与噪声设置，只是把生成器换成
+ * {@link SpatialLoopChunkGenerator}（多一个半径）。超平坦/调试世界的生成器不是
+ * {@code NoiseBasedChunkGenerator}，因此保持玩家选择不变。
  */
 @Mixin(CreateWorldScreen.class)
 public abstract class CreateWorldScreenMixin {
@@ -40,12 +40,14 @@ public abstract class CreateWorldScreenMixin {
         if (!LoopGeometry.isEnabled(radius) || this.uiState.isDebug()) {
             return;
         }
-        this.uiState.updateDimensions((registry, dimensions) -> this.spatialloop$replaceOverworld(registry, dimensions, radius));
+        this.uiState.updateDimensions(
+                (registry, dimensions) -> this.spatialloop$replaceOverworld(registry, dimensions, radius)
+        );
     }
 
     @Unique
     private WorldDimensions spatialloop$replaceOverworld(
-            net.minecraft.core.RegistryAccess.Frozen registry,
+            RegistryAccess.Frozen registry,
             WorldDimensions dimensions,
             int radius
     ) {
@@ -53,21 +55,14 @@ public abstract class CreateWorldScreenMixin {
         if (stem == null) {
             return dimensions;
         }
-        // 超平坦 / 调试世界 / 数据包自定义生成器是玩家的明确选择，不在这里覆盖。
-        if (!(stem.generator() instanceof net.minecraft.world.level.levelgen.NoiseBasedChunkGenerator)) {
+        if (!(stem.generator() instanceof NoiseBasedChunkGenerator generator)) {
             return dimensions;
         }
-        DimensionType type = stem.type().value();
-        long seed = this.uiState.getSettings().options().seed();
-        List<Holder<Biome>> biomes = SpatialLoopBiomes.resolve(registry);
-        SpatialLoopChunkGenerator generator = new SpatialLoopChunkGenerator(
-                biomes,
-                radius,
-                seed,
-                type.minY(),
-                type.height(),
-                LoopTerrain.SEA_LEVEL
+        SpatialLoopChunkGenerator periodic = new SpatialLoopChunkGenerator(
+                generator.getBiomeSource(),
+                generator.generatorSettings(),
+                radius
         );
-        return dimensions.replaceOverworldGenerator(registry, generator);
+        return dimensions.replaceOverworldGenerator(registry, periodic);
     }
 }

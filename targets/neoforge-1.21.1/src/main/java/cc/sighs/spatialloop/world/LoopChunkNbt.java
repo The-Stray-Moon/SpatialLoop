@@ -7,21 +7,19 @@ import net.minecraft.nbt.IntArrayTag;
 import net.minecraft.nbt.IntTag;
 import net.minecraft.nbt.ListTag;
 import net.minecraft.nbt.Tag;
+import net.minecraft.world.level.ChunkPos;
 
 /**
  * 区块级存档 NBT 的坐标平移。
  *
  * <p>带绝对坐标的部分必须跟着存档槽一起平移，否则把区块 C+P 的数据读到 C（或反过来）时，
- * 方块实体、计划刻、实体、POI 会留在原来的周期里。方块本身用区块内相对坐标，不需要处理。
- *
- * <p>结构起点/引用也带区块坐标，但本生成器不生成结构（{@code createStructures} 是空实现），
- * 这些标签始终为空；将来若支持结构，必须在这里补上平移。
+ * 方块实体、计划刻、实体、POI、结构起点/引用会留在原来的周期里。方块本身用区块内相对坐标，不需要处理。
  */
 public final class LoopChunkNbt {
     private LoopChunkNbt() {
     }
 
-    /** 区块本体：{@code xPos}/{@code zPos}、方块实体、计划刻。 */
+    /** 区块本体：{@code xPos}/{@code zPos}、方块实体、计划刻、结构起点与引用。 */
     public static void rebase(CompoundTag tag, int deltaChunkX, int deltaChunkZ) {
         if (deltaChunkX == 0 && deltaChunkZ == 0) {
             return;
@@ -45,6 +43,71 @@ public final class LoopChunkNbt {
 
         shiftTicks(tag, "block_ticks", deltaX, deltaZ);
         shiftTicks(tag, "fluid_ticks", deltaX, deltaZ);
+        rebaseStructures(tag.getCompound("structures"), deltaChunkX, deltaChunkZ);
+    }
+
+    /**
+     * 结构数据：{@code starts.<id>} 的 {@code ChunkX}/{@code ChunkZ} 与每个 piece 的
+     * {@code BB}/{@code TPX}/{@code TPZ}/{@code PosX}/{@code PosZ}，以及 {@code References} 里的区块坐标。
+     */
+    private static void rebaseStructures(CompoundTag structures, int deltaChunkX, int deltaChunkZ) {
+        if (structures.isEmpty()) {
+            return;
+        }
+        int deltaX = deltaChunkX * 16;
+        int deltaZ = deltaChunkZ * 16;
+
+        CompoundTag starts = structures.getCompound("starts");
+        for (String key : starts.getAllKeys().toArray(String[]::new)) {
+            CompoundTag start = starts.getCompound(key);
+            shiftInt(start, "ChunkX", deltaChunkX);
+            shiftInt(start, "ChunkZ", deltaChunkZ);
+            ListTag children = start.getList("Children", Tag.TAG_COMPOUND);
+            for (int i = 0; i < children.size(); i++) {
+                CompoundTag piece = children.getCompound(i);
+                shiftBox(piece, "BB", deltaX, deltaZ);
+                shiftInt(piece, "TPX", deltaX);
+                shiftInt(piece, "TPZ", deltaZ);
+                shiftInt(piece, "PosX", deltaX);
+                shiftInt(piece, "PosZ", deltaZ);
+            }
+        }
+
+        CompoundTag references = structures.getCompound("References");
+        for (String key : references.getAllKeys().toArray(String[]::new)) {
+            long[] chunks = references.getLongArray(key);
+            for (int i = 0; i < chunks.length; i++) {
+                chunks[i] = ChunkPos.asLong(
+                        ChunkPos.getX(chunks[i]) + deltaChunkX,
+                        ChunkPos.getZ(chunks[i]) + deltaChunkZ
+                );
+            }
+            references.putLongArray(key, chunks);
+        }
+    }
+
+    private static void shiftInt(CompoundTag holder, String key, int delta) {
+        if (holder.contains(key, Tag.TAG_INT)) {
+            holder.putInt(key, holder.getInt(key) + delta);
+        }
+    }
+
+    /** {@code BB} 由 {@code BoundingBox.CODEC}（INT_STREAM）编码，按 INT 列表或 int 数组处理。 */
+    private static void shiftBox(CompoundTag holder, String key, int deltaX, int deltaZ) {
+        Tag box = holder.get(key);
+        if (box instanceof IntArrayTag array && array.size() == 6) {
+            int[] values = array.getAsIntArray();
+            values[0] += deltaX;
+            values[3] += deltaX;
+            values[2] += deltaZ;
+            values[5] += deltaZ;
+            holder.put(key, new IntArrayTag(values));
+        } else if (box instanceof ListTag list && list.size() == 6 && list.getElementType() == Tag.TAG_INT) {
+            list.set(0, IntTag.valueOf(list.getInt(0) + deltaX));
+            list.set(3, IntTag.valueOf(list.getInt(3) + deltaX));
+            list.set(2, IntTag.valueOf(list.getInt(2) + deltaZ));
+            list.set(5, IntTag.valueOf(list.getInt(5) + deltaZ));
+        }
     }
 
     /** 实体区块：{@code Position}（区块坐标）与每条实体的 {@code Pos}（世界坐标）。 */

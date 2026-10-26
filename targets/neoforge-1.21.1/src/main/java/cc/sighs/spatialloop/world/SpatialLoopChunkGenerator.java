@@ -1,103 +1,107 @@
 package cc.sighs.spatialloop.world;
 
 import cc.sighs.spatialloop.geometry.LoopGeometry;
-import cc.sighs.spatialloop.terrain.LoopTerrain;
+import com.google.common.base.Suppliers;
+import com.mojang.datafixers.util.Pair;
 import com.mojang.serialization.Codec;
 import com.mojang.serialization.MapCodec;
 import com.mojang.serialization.codecs.RecordCodecBuilder;
+import it.unimi.dsi.fastutil.ints.IntArraySet;
+import it.unimi.dsi.fastutil.ints.IntSet;
+import it.unimi.dsi.fastutil.objects.ObjectArraySet;
+import java.util.ArrayList;
+import java.util.Arrays;
+import java.util.HashSet;
 import java.util.List;
-import java.util.concurrent.CompletableFuture;
+import java.util.Map;
+import java.util.Set;
+import java.util.function.Supplier;
+import java.util.stream.Collectors;
+import javax.annotation.Nullable;
+import net.minecraft.CrashReport;
+import net.minecraft.ReportedException;
 import net.minecraft.SharedConstants;
 import net.minecraft.core.BlockPos;
 import net.minecraft.core.Holder;
+import net.minecraft.core.HolderSet;
+import net.minecraft.core.Registry;
 import net.minecraft.core.RegistryAccess;
 import net.minecraft.core.SectionPos;
+import net.minecraft.core.registries.Registries;
+import net.minecraft.server.level.ServerLevel;
 import net.minecraft.server.level.WorldGenRegion;
 import net.minecraft.world.level.ChunkPos;
-import net.minecraft.world.level.LevelHeightAccessor;
-import net.minecraft.world.level.NoiseColumn;
 import net.minecraft.world.level.StructureManager;
 import net.minecraft.world.level.WorldGenLevel;
 import net.minecraft.world.level.biome.Biome;
 import net.minecraft.world.level.biome.BiomeManager;
-import net.minecraft.world.level.block.Blocks;
-import net.minecraft.world.level.block.state.BlockState;
+import net.minecraft.world.level.biome.BiomeSource;
+import net.minecraft.world.level.biome.FeatureSorter;
 import net.minecraft.world.level.chunk.ChunkAccess;
 import net.minecraft.world.level.chunk.ChunkGenerator;
 import net.minecraft.world.level.chunk.ChunkGeneratorStructureState;
 import net.minecraft.world.level.chunk.LevelChunkSection;
+import net.minecraft.world.level.chunk.status.ChunkStatus;
 import net.minecraft.world.level.levelgen.GenerationStep;
-import net.minecraft.world.level.levelgen.Heightmap;
+import net.minecraft.world.level.levelgen.LegacyRandomSource;
+import net.minecraft.world.level.levelgen.NoiseBasedChunkGenerator;
+import net.minecraft.world.level.levelgen.NoiseGeneratorSettings;
 import net.minecraft.world.level.levelgen.RandomState;
+import net.minecraft.world.level.levelgen.RandomSupport;
+import net.minecraft.world.level.levelgen.WorldgenRandom;
+import net.minecraft.world.level.levelgen.XoroshiroRandomSource;
 import net.minecraft.world.level.levelgen.blending.Blender;
+import net.minecraft.world.level.levelgen.placement.PlacedFeature;
+import net.minecraft.world.level.levelgen.structure.BoundingBox;
+import net.minecraft.world.level.levelgen.structure.Structure;
+import net.minecraft.world.level.levelgen.structure.StructurePiece;
+import net.minecraft.world.level.levelgen.structure.StructureSet;
+import net.minecraft.world.level.levelgen.structure.StructureStart;
+import net.minecraft.world.level.levelgen.structure.pieces.PiecesContainer;
+import net.minecraft.world.level.levelgen.structure.placement.ConcentricRingsStructurePlacement;
+import net.minecraft.world.level.levelgen.structure.placement.RandomSpreadStructurePlacement;
+import net.minecraft.world.level.levelgen.structure.placement.StructurePlacement;
 import net.minecraft.world.level.levelgen.structure.templatesystem.StructureTemplateManager;
 
 /**
  * 循环世界的地形生成器。
  *
- * <p>和原版 {@code NoiseBasedChunkGenerator} 最大的区别只有一条：所有地形/生物群系/洞穴采样都经过
- * {@link LoopTerrain} 的周期化坐标。因此区块 {@code (x + 2r, z)} 与 {@code (x, z)} 生成的方块
- * <b>逐块完全相同</b>，东接西、南接北不会有断崖或生态错位。
+ * <p>地形、生物群系、洞穴、地表全部交给原版 {@link NoiseBasedChunkGenerator}；本类只做两件事：
  *
- * <p>装饰（树、草、矿）交给 {@link LoopDecorator}：原版装饰依赖邻居区块的当前状态，异步生成顺序会让
- * 同一块空间的两个副本长出不同的树；自有装饰只依赖折回周期后的坐标，结果与生成顺序无关。
+ * <ol>
+ *   <li><b>坐标折回</b>：结构放置、装饰种子、雕刻器种子都按折回后的 canonical 坐标生成，再整体平移到
+ *       当前副本。原版/模组注册的 feature、structure set 全部照常参与。</li>
+ *   <li><b>记录半径</b>：{@code radius} 是存档属性（codec 存在 level.dat 的生成器里），噪声的周期化
+ *       由 {@code RandomState} 创建 {@code NormalNoise} 时按这个半径盖上周期（见
+ *       {@link LoopNoisePeriodAware}）。</li>
+ * </ol>
  *
- * <p>结构（村庄、要塞等）会跨越接缝，因此本生成器不放置结构。
+ * <p>因此区块 {@code (x + 2r, z)} 与 {@code (x, z)} 生成的方块逐块相同，接缝处也连续。
  */
-public final class SpatialLoopChunkGenerator extends ChunkGenerator {
+public final class SpatialLoopChunkGenerator extends NoiseBasedChunkGenerator {
     public static final MapCodec<SpatialLoopChunkGenerator> CODEC = RecordCodecBuilder.mapCodec(instance -> instance.group(
-            Biome.CODEC.listOf().fieldOf("biomes").forGetter(generator -> generator.biomes),
-            Codec.INT.fieldOf("radius").forGetter(generator -> generator.radius),
-            Codec.LONG.fieldOf("seed").forGetter(generator -> generator.seed),
-            Codec.INT.fieldOf("min_y").forGetter(generator -> generator.minY),
-            Codec.INT.fieldOf("height").forGetter(generator -> generator.height),
-            Codec.INT.fieldOf("sea_level").forGetter(generator -> generator.seaLevel)
+            BiomeSource.CODEC.fieldOf("biome_source").forGetter(ChunkGenerator::getBiomeSource),
+            NoiseGeneratorSettings.CODEC.fieldOf("settings").forGetter(SpatialLoopChunkGenerator::generatorSettings),
+            Codec.INT.fieldOf("radius").forGetter(SpatialLoopChunkGenerator::radius)
     ).apply(instance, SpatialLoopChunkGenerator::new));
 
-    private static final BlockState AIR = Blocks.AIR.defaultBlockState();
-    private static final BlockState BEDROCK = Blocks.BEDROCK.defaultBlockState();
-    private static final BlockState STONE = Blocks.STONE.defaultBlockState();
-    private static final BlockState DEEPSLATE = Blocks.DEEPSLATE.defaultBlockState();
-    private static final BlockState DIRT = Blocks.DIRT.defaultBlockState();
-    private static final BlockState GRASS_BLOCK = Blocks.GRASS_BLOCK.defaultBlockState();
-    private static final BlockState SAND = Blocks.SAND.defaultBlockState();
-    private static final BlockState SANDSTONE = Blocks.SANDSTONE.defaultBlockState();
-    private static final BlockState GRAVEL = Blocks.GRAVEL.defaultBlockState();
-    private static final BlockState WATER = Blocks.WATER.defaultBlockState();
-    private static final BlockState SNOW = Blocks.SNOW.defaultBlockState();
-
-    private static final int CAVE_STEP = 4;
-    private static final int CAVE_GRID = 5;
-
-    private final List<Holder<Biome>> biomes;
     private final int radius;
-    private final long seed;
-    private final int minY;
-    private final int height;
-    private final int seaLevel;
-    private final int maxY;
-    private final LoopTerrain terrain;
-    private final LoopDecorator decorator;
+    private final Supplier<List<FeatureSorter.StepFeatureData>> featuresPerStep;
+    @Nullable
+    private volatile Set<Long> spatialloop$ringChunks;
 
-    public SpatialLoopChunkGenerator(List<Holder<Biome>> biomes, int radius, long seed, int minY, int height, int seaLevel) {
-        super(new SpatialLoopBiomeSource(biomes, seed, radius));
-        this.biomes = List.copyOf(biomes);
+    public SpatialLoopChunkGenerator(BiomeSource biomeSource, Holder<NoiseGeneratorSettings> settings, int radius) {
+        super(biomeSource, settings);
         this.radius = LoopGeometry.sanitizeRadius(radius);
-        this.seed = seed;
-        this.minY = minY;
-        this.height = height;
-        this.seaLevel = seaLevel;
-        this.maxY = minY + height - 1;
-        this.terrain = new LoopTerrain(seed, this.radius);
-        this.decorator = new LoopDecorator(seed, this.radius);
+        // 与原版 ChunkGenerator 完全一致：原版/模组注册进生物群系的 placed feature 都会参与排序和放置。
+        this.featuresPerStep = Suppliers.memoize(() -> FeatureSorter.buildFeaturesPerStep(
+                List.copyOf(this.biomeSource.possibleBiomes()),
+                holder -> holder.value().getGenerationSettings().features(),
+                true));
     }
 
     public int radius() {
         return this.radius;
-    }
-
-    public long seed() {
-        return this.seed;
     }
 
     @Override
@@ -106,11 +110,25 @@ public final class SpatialLoopChunkGenerator extends ChunkGenerator {
     }
 
     @Override
-    public CompletableFuture<ChunkAccess> fillFromNoise(Blender blender, RandomState randomState, StructureManager structureManager, ChunkAccess chunk) {
-        this.generate(chunk);
-        return CompletableFuture.completedFuture(chunk);
+    public void buildSurface(
+            WorldGenRegion region,
+            StructureManager structureManager,
+            RandomState randomState,
+            ChunkAccess chunk
+    ) {
+        LoopFeatureNoise.push(LoopGeometry.periodBlocks(this.radius));
+        try {
+            super.buildSurface(region, structureManager, randomState, chunk);
+        } finally {
+            LoopFeatureNoise.pop();
+        }
     }
 
+    /**
+     * 原版雕刻流程原样跑，只是让 {@code setLargeFeatureSeed} 用折回后的相邻区块坐标。
+     *
+     * <p>洞穴布局相对区块原点，种子折回后副本的洞穴逐块相同；真正的雕刻位置仍是绝对坐标。
+     */
     @Override
     public void applyCarvers(
             WorldGenRegion region,
@@ -121,19 +139,21 @@ public final class SpatialLoopChunkGenerator extends ChunkGenerator {
             ChunkAccess chunk,
             GenerationStep.Carving step
     ) {
-        // 洞穴在 fillFromNoise 里一次成形，不需要再跑原版雕刻器。
+        LoopCarverSeed.push(this.radius);
+        try {
+            super.applyCarvers(region, seed, randomState, biomeManager, structureManager, chunk, step);
+        } finally {
+            LoopCarverSeed.pop();
+        }
     }
 
-    @Override
-    public void buildSurface(WorldGenRegion region, StructureManager structureManager, RandomState randomState, ChunkAccess chunk) {
-        // 地表在 fillFromNoise 里一次成形。
-    }
-
-    @Override
-    public void spawnOriginalMobs(WorldGenRegion region) {
-    }
-
-    /** 结构会横跨接缝，这里选择不生成结构，保证接缝两侧完全一致。 */
+    /**
+     * 结构放置：<b>判定</b>用折回后的 canonical 区块坐标，<b>生成</b>也以 canonical 坐标为原点，
+     * 生成完再把所有 piece 平移到当前区块所在的周期。
+     *
+     * <p>这样放置随机数、结构布局、排他区判定在副本之间完全一致；平移后的 piece 直接落在副本自己的
+     * 坐标里，后续 {@code createReferences} 和 FEATURES 阶段都按普通绝对坐标工作。
+     */
     @Override
     public void createStructures(
             RegistryAccess registryAccess,
@@ -142,242 +162,371 @@ public final class SpatialLoopChunkGenerator extends ChunkGenerator {
             ChunkAccess chunk,
             StructureTemplateManager templateManager
     ) {
-    }
-
-    @Override
-    public void createReferences(WorldGenLevel level, StructureManager structureManager, ChunkAccess chunk) {
-    }
-
-    @Override
-    public int getSpawnHeight(LevelHeightAccessor level) {
-        int spawn = this.terrain.heightAt(0, 0) + 1;
-        return Math.max(this.minY + 1, Math.min(this.maxY - 1, spawn));
-    }
-
-    @Override
-    public int getGenDepth() {
-        return this.height;
-    }
-
-    @Override
-    public int getSeaLevel() {
-        return this.seaLevel;
-    }
-
-    @Override
-    public int getMinY() {
-        return this.minY;
-    }
-
-    @Override
-    public int getBaseHeight(int x, int z, Heightmap.Types type, LevelHeightAccessor level, RandomState randomState) {
-        int top = this.terrain.heightAt(x, z);
-        boolean oceanFloor = type == Heightmap.Types.OCEAN_FLOOR || type == Heightmap.Types.OCEAN_FLOOR_WG;
-        int height = oceanFloor ? top + 1 : Math.max(top + 1, this.seaLevel + 1);
-        return Math.max(this.minY, Math.min(this.maxY, height));
-    }
-
-    @Override
-    public NoiseColumn getBaseColumn(int x, int z, LevelHeightAccessor level, RandomState randomState) {
-        int top = this.terrain.heightAt(x, z);
-        int biome = this.terrain.biomeAt(x, z);
-        BlockState[] column = new BlockState[level.getHeight()];
-        for (int i = 0; i < column.length; i++) {
-            int y = level.getMinBuildHeight() + i;
-            if (y > top) {
-                column[i] = y <= this.seaLevel ? WATER : AIR;
-            } else if (y == top) {
-                column[i] = this.surfaceState(biome, top, x, z);
-            } else if (y >= top - 3) {
-                column[i] = top <= this.seaLevel ? this.seabedState(biome, x, z) : DIRT;
-            } else {
-                column[i] = y < 0 ? DEEPSLATE : STONE;
-            }
+        if (!structureManager.shouldGenerateStructures()) {
+            return;
         }
-        return new NoiseColumn(level.getMinBuildHeight(), column);
-    }
+        ChunkPos chunkPos = chunk.getPos();
+        ChunkPos canonical = new ChunkPos(
+                LoopGeometry.wrapChunk(chunkPos.x, this.radius),
+                LoopGeometry.wrapChunk(chunkPos.z, this.radius)
+        );
+        int deltaChunkX = chunkPos.x - canonical.x;
+        int deltaChunkZ = chunkPos.z - canonical.z;
+        SectionPos sectionPos = SectionPos.bottomOf(chunk);
+        RandomState randomState = structureState.randomState();
+        long seed = structureState.getLevelSeed();
 
-    @Override
-    public void addDebugScreenInfo(List<String> info, RandomState randomState, BlockPos pos) {
-        info.add("SpatialLoop radius: " + this.radius + " chunks");
-    }
+        structureState.possibleStructureSets().forEach(holder -> {
+            StructurePlacement placement = holder.value().placement();
+            List<StructureSet.StructureSelectionEntry> entries = holder.value().structures();
 
-    // ------------------------------------------------------------------
-    // 地形
-    // ------------------------------------------------------------------
-
-    private void generate(ChunkAccess chunk) {
-        ChunkPos pos = chunk.getPos();
-        int baseX = pos.getMinBlockX();
-        int baseZ = pos.getMinBlockZ();
-        LevelChunkSection[] sections = chunk.getSections();
-        int minSection = chunk.getMinSection();
-
-        int[] heights = new int[256];
-        int[] biomes = new int[256];
-        for (int dz = 0; dz < 16; dz++) {
-            for (int dx = 0; dx < 16; dx++) {
-                int index = dz * 16 + dx;
-                int x = baseX + dx;
-                int z = baseZ + dz;
-                heights[index] = this.terrain.heightAt(x, z);
-                biomes[index] = this.terrain.biomeAt(x, z);
-            }
-        }
-
-        for (int dz = 0; dz < 16; dz++) {
-            for (int dx = 0; dx < 16; dx++) {
-                int index = dz * 16 + dx;
-                this.fillColumn(sections, minSection, baseX + dx, baseZ + dz, heights[index], biomes[index]);
-            }
-        }
-
-        this.carveCaves(sections, minSection, baseX, baseZ, heights);
-    }
-
-    private void fillColumn(LevelChunkSection[] sections, int minSection, int x, int z, int top, int biome) {
-        for (int y = this.minY; y <= top; y++) {
-            BlockState state;
-            if (y == this.minY || (y < this.minY + 3 && this.bedrockRoll(x, y, z))) {
-                state = BEDROCK;
-            } else if (y == top) {
-                state = this.surfaceState(biome, top, x, z);
-            } else if (top <= this.seaLevel && y >= top - 3) {
-                state = this.seabedState(biome, x, z);
-            } else if (biome == LoopTerrain.BIOME_DESERT && top > this.seaLevel && y >= top - 4) {
-                state = SAND;
-            } else if (biome == LoopTerrain.BIOME_DESERT && top > this.seaLevel && y >= top - 9) {
-                state = SANDSTONE;
-            } else if (y >= top - 3) {
-                state = DIRT;
-            } else {
-                state = y < 0 ? DEEPSLATE : STONE;
-            }
-            setBlock(sections, minSection, x, y, z, state);
-        }
-
-        for (int y = top + 1; y <= this.seaLevel; y++) {
-            setBlock(sections, minSection, x, y, z, WATER);
-        }
-
-        if (biome == LoopTerrain.BIOME_SNOWY_PLAINS && top > this.seaLevel && top + 1 <= this.maxY) {
-            setBlock(sections, minSection, x, top + 1, z, SNOW);
-        }
-    }
-
-    private void carveCaves(LevelChunkSection[] sections, int minSection, int baseX, int baseZ, int[] heights) {
-        int step = CAVE_STEP;
-        int gridY = (this.height + step - 1) / step + 1;
-        double[] grid = new double[CAVE_GRID * CAVE_GRID * gridY];
-        for (int gx = 0; gx < CAVE_GRID; gx++) {
-            for (int gz = 0; gz < CAVE_GRID; gz++) {
-                for (int gy = 0; gy < gridY; gy++) {
-                    int y = Math.min(this.maxY, this.minY + gy * step);
-                    grid[(gx * CAVE_GRID + gz) * gridY + gy] = this.terrain.caveDensity(baseX + gx * step, y, baseZ + gz * step);
+            for (StructureSet.StructureSelectionEntry entry : entries) {
+                StructureStart existing = structureManager.getStartForStructure(sectionPos, entry.structure().value(), chunk);
+                if (existing != null && existing.isValid()) {
+                    return;
                 }
             }
-        }
+            if (!this.spatialloop$isStructureChunk(structureState, placement, canonical)) {
+                return;
+            }
 
-        for (int dz = 0; dz < 16; dz++) {
-            for (int dx = 0; dx < 16; dx++) {
-                int top = heights[dz * 16 + dx];
-                int limit = top - 6;
-                int lowest = this.minY + 2;
-                if (limit <= lowest) {
+            if (entries.size() == 1) {
+                this.spatialloop$tryGenerateStructure(
+                        entries.get(0), structureManager, registryAccess, randomState, templateManager,
+                        seed, chunkPos, canonical, sectionPos, chunk, deltaChunkX, deltaChunkZ
+                );
+            } else {
+                List<StructureSet.StructureSelectionEntry> remaining = new ArrayList<>(entries);
+                WorldgenRandom random = new WorldgenRandom(new LegacyRandomSource(0L));
+                random.setLargeFeatureSeed(seed, canonical.x, canonical.z);
+                int totalWeight = 0;
+                for (StructureSet.StructureSelectionEntry entry : remaining) {
+                    totalWeight += entry.weight();
+                }
+                while (!remaining.isEmpty() && totalWeight > 0) {
+                    int pick = random.nextInt(totalWeight);
+                    int index = 0;
+                    for (StructureSet.StructureSelectionEntry entry : remaining) {
+                        pick -= entry.weight();
+                        if (pick < 0) {
+                            break;
+                        }
+                        index++;
+                    }
+                    StructureSet.StructureSelectionEntry chosen = remaining.get(Math.min(index, remaining.size() - 1));
+                    if (this.spatialloop$tryGenerateStructure(
+                            chosen, structureManager, registryAccess, randomState, templateManager,
+                            seed, chunkPos, canonical, sectionPos, chunk, deltaChunkX, deltaChunkZ
+                    )) {
+                        return;
+                    }
+                    remaining.remove(chosen);
+                    totalWeight -= chosen.weight();
+                }
+            }
+        });
+    }
+
+    private boolean spatialloop$tryGenerateStructure(
+            StructureSet.StructureSelectionEntry entry,
+            StructureManager structureManager,
+            RegistryAccess registryAccess,
+            RandomState randomState,
+            StructureTemplateManager templateManager,
+            long seed,
+            ChunkPos chunkPos,
+            ChunkPos canonical,
+            SectionPos sectionPos,
+            ChunkAccess chunk,
+            int deltaChunkX,
+            int deltaChunkZ
+    ) {
+        Structure structure = entry.structure().value();
+        StructureStart generated = structure.generate(
+                registryAccess,
+                this,
+                this.biomeSource,
+                randomState,
+                templateManager,
+                seed,
+                canonical,
+                0,
+                chunk,
+                structure.biomes()::contains
+        );
+        if (!generated.isValid()) {
+            return false;
+        }
+        StructureStart translated = generated;
+        if (deltaChunkX != 0 || deltaChunkZ != 0) {
+            for (StructurePiece piece : generated.getPieces()) {
+                piece.move(deltaChunkX * 16, 0, deltaChunkZ * 16);
+            }
+            translated = new StructureStart(
+                    generated.getStructure(),
+                    chunkPos,
+                    generated.getReferences(),
+                    new PiecesContainer(generated.getPieces())
+            );
+        }
+        structureManager.setStartForStructure(sectionPos, structure, translated, chunk);
+        return true;
+    }
+
+    /**
+     * 结构判定统一在 canonical 区块坐标上做。
+     *
+     * <p>同心环（要塞）的环位置是按世界原点算的绝对坐标，直接比较的话小半径世界里永远不会命中；
+     * 这里把环位置按周期折回，让要塞以周期副本的形式出现在区域内。
+     */
+    private boolean spatialloop$isStructureChunk(
+            ChunkGeneratorStructureState state,
+            StructurePlacement placement,
+            ChunkPos canonical
+    ) {
+        if (placement instanceof ConcentricRingsStructurePlacement rings) {
+            return this.spatialloop$ringChunks(state, rings).contains(canonical.toLong());
+        }
+        return placement.isStructureChunk(state, canonical.x, canonical.z);
+    }
+
+    private Set<Long> spatialloop$ringChunks(ChunkGeneratorStructureState state, ConcentricRingsStructurePlacement rings) {
+        Set<Long> cached = this.spatialloop$ringChunks;
+        if (cached != null) {
+            return cached;
+        }
+        Set<Long> built = new HashSet<>();
+        List<ChunkPos> positions = state.getRingPositionsFor(rings);
+        // 原版要塞是分散在 3000 万方块世界里的 128 个同心环位置；全部折回区域会变成“每个区块一个要塞”。
+        // 有限循环世界里只保留第一个环位置，折回后作为唯一要塞，副本按周期重复。
+        if (positions != null && !positions.isEmpty()) {
+            ChunkPos pos = positions.get(0);
+            built.add(ChunkPos.asLong(
+                    LoopGeometry.wrapChunk(pos.x, this.radius),
+                    LoopGeometry.wrapChunk(pos.z, this.radius)
+            ));
+        }
+        this.spatialloop$ringChunks = built;
+        return built;
+    }
+
+    /**
+     * {@code /locate}、藏宝图、末影之眼都走这个方法。原版按绝对坐标搜索，在这个模组里会找不到
+     * （甚至因为到处生成候选区块把服务器线程卡住）。这里只在 canonical 区域内搜，再把结果平移到
+     * 离玩家最近的那个周期副本。
+     */
+    @Override
+    @Nullable
+    public Pair<BlockPos, Holder<Structure>> findNearestMapStructure(
+            ServerLevel level,
+            HolderSet<Structure> targets,
+            BlockPos center,
+            int radiusChunks,
+            boolean skipExistingChunks
+    ) {
+        ChunkGeneratorStructureState state = level.getChunkSource().getGeneratorState();
+        long seed = state.getLevelSeed();
+        int period = LoopGeometry.periodBlocks(this.radius);
+        int maxBlockDistance = Math.max(0, radiusChunks) * 16;
+
+        Pair<BlockPos, Holder<Structure>> best = null;
+        double bestDistance = Double.MAX_VALUE;
+
+        for (Holder<StructureSet> setHolder : state.possibleStructureSets()) {
+            StructurePlacement placement = setHolder.value().placement();
+            for (StructureSet.StructureSelectionEntry entry : setHolder.value().structures()) {
+                if (!targets.contains(entry.structure())) {
                     continue;
                 }
-                int gx = dx / step;
-                int gz = dz / step;
-                double tx = (dx % step) / (double) step;
-                double tz = (dz % step) / (double) step;
-                for (int y = lowest; y <= limit; y++) {
-                    int relative = y - this.minY;
-                    int gy = relative / step;
-                    double ty = (relative % step) / (double) step;
-                    if (sampleCave(grid, gridY, gx, gz, gy, tx, ty, tz) < 0.0) {
-                        setBlock(sections, minSection, baseX + dx, y, baseZ + dz, AIR);
+                Structure structure = entry.structure().value();
+
+                if (placement instanceof RandomSpreadStructurePlacement spread) {
+                    int spacing = spread.spacing();
+                    if (spacing <= 0) {
+                        continue;
+                    }
+                    int minCellX = Math.floorDiv(-this.radius, spacing);
+                    int maxCellX = Math.floorDiv(this.radius - 1, spacing);
+                    int minCellZ = Math.floorDiv(-this.radius, spacing);
+                    int maxCellZ = Math.floorDiv(this.radius - 1, spacing);
+                    for (int cellX = minCellX; cellX <= maxCellX; cellX++) {
+                        for (int cellZ = minCellZ; cellZ <= maxCellZ; cellZ++) {
+                            ChunkPos candidate = spread.getPotentialStructureChunk(seed, cellX * spacing, cellZ * spacing);
+                            if (candidate.x < -this.radius || candidate.x >= this.radius
+                                    || candidate.z < -this.radius || candidate.z >= this.radius) {
+                                continue;
+                            }
+                            if (!placement.isStructureChunk(state, candidate.x, candidate.z)) {
+                                continue;
+                            }
+                            StructureStart start = this.spatialloop$startAt(level, candidate, structure, skipExistingChunks);
+                            if (start == null) {
+                                continue;
+                            }
+                            BlockPos pos = spatialloop$nearestCopy(placement.getLocatePos(candidate), center, period);
+                            if (Math.abs(pos.getX() - center.getX()) > maxBlockDistance
+                                    || Math.abs(pos.getZ() - center.getZ()) > maxBlockDistance) {
+                                continue;
+                            }
+                            double distance = pos.distSqr(center);
+                            if (distance < bestDistance) {
+                                bestDistance = distance;
+                                best = Pair.of(pos, entry.structure());
+                            }
+                        }
+                    }
+                } else if (placement instanceof ConcentricRingsStructurePlacement rings) {
+                    for (long packed : this.spatialloop$ringChunks(state, rings)) {
+                        ChunkPos canonical = new ChunkPos(packed);
+                        StructureStart start = this.spatialloop$startAt(level, canonical, structure, skipExistingChunks);
+                        if (start == null) {
+                            continue;
+                        }
+                        BlockPos pos = spatialloop$nearestCopy(placement.getLocatePos(canonical), center, period);
+                        if (Math.abs(pos.getX() - center.getX()) > maxBlockDistance
+                                || Math.abs(pos.getZ() - center.getZ()) > maxBlockDistance) {
+                            continue;
+                        }
+                        double distance = pos.distSqr(center);
+                        if (distance < bestDistance) {
+                            bestDistance = distance;
+                            best = Pair.of(pos, entry.structure());
+                        }
                     }
                 }
             }
         }
+        return best;
     }
 
-    private static double sampleCave(double[] grid, int gridY, int gx, int gz, int gy, double tx, double ty, double tz) {
-        int gx1 = Math.min(gx + 1, CAVE_GRID - 1);
-        int gz1 = Math.min(gz + 1, CAVE_GRID - 1);
-        int gy1 = Math.min(gy + 1, gridY - 1);
-        double c000 = grid[(gx * CAVE_GRID + gz) * gridY + gy];
-        double c100 = grid[(gx1 * CAVE_GRID + gz) * gridY + gy];
-        double c010 = grid[(gx * CAVE_GRID + gz1) * gridY + gy];
-        double c110 = grid[(gx1 * CAVE_GRID + gz1) * gridY + gy];
-        double c001 = grid[(gx * CAVE_GRID + gz) * gridY + gy1];
-        double c101 = grid[(gx1 * CAVE_GRID + gz) * gridY + gy1];
-        double c011 = grid[(gx * CAVE_GRID + gz1) * gridY + gy1];
-        double c111 = grid[(gx1 * CAVE_GRID + gz1) * gridY + gy1];
-        double c00 = c000 + (c100 - c000) * tx;
-        double c10 = c010 + (c110 - c010) * tx;
-        double c01 = c001 + (c101 - c001) * tx;
-        double c11 = c011 + (c111 - c011) * tx;
-        double c0 = c00 + (c10 - c00) * tz;
-        double c1 = c01 + (c11 - c01) * tz;
-        return c0 + (c1 - c0) * ty;
-    }
-
-    private static void setBlock(LevelChunkSection[] sections, int minSection, int x, int y, int z, BlockState state) {
-        int sectionIndex = SectionPos.blockToSectionCoord(y) - minSection;
-        if (sectionIndex < 0 || sectionIndex >= sections.length) {
-            return;
+    @Nullable
+    private StructureStart spatialloop$startAt(
+            ServerLevel level,
+            ChunkPos pos,
+            Structure structure,
+            boolean skipExistingChunks
+    ) {
+        ChunkAccess chunk = level.getChunk(pos.x, pos.z, ChunkStatus.STRUCTURE_STARTS, !skipExistingChunks);
+        if (chunk == null) {
+            return null;
         }
-        sections[sectionIndex].setBlockState(x & 15, y & 15, z & 15, state, false);
+        StructureStart start = chunk.getStartForStructure(structure);
+        return start != null && start.isValid() ? start : null;
     }
 
-    /**
-     * 基岩层的随机高度必须按周期坐标算：直接哈希绝对坐标会让同一块空间的两个副本在 y=-63 附近不一致。
-     */
-    private boolean bedrockRoll(int x, int y, int z) {
-        int wrappedX = LoopGeometry.wrapBlock(x, this.radius);
-        int wrappedZ = LoopGeometry.wrapBlock(z, this.radius);
-        long hash = this.seed ^ (wrappedX * 0x9E3779B97F4A7C15L) ^ (wrappedZ * 0xC2B2AE3D27D4EB4FL) ^ (y * 0x165667B19E3779F9L);
-        hash ^= hash >>> 33;
-        hash *= 0xFF51AFD7ED558CCDL;
-        hash ^= hash >>> 33;
-        double roll = (hash >>> 11) * 0x1.0p-53;
-        int depth = this.minY + 3 - y;
-        return roll < depth * 0.22;
+    private static BlockPos spatialloop$nearestCopy(BlockPos pos, BlockPos center, int period) {
+        int dx = period * Math.round((float) (center.getX() - pos.getX()) / period);
+        int dz = period * Math.round((float) (center.getZ() - pos.getZ()) / period);
+        return pos.offset(dx, 0, dz);
     }
-
-    private BlockState surfaceState(int biome, int top, int x, int z) {
-        if (top <= this.seaLevel) {
-            return this.seabedState(biome, x, z);
-        }
-        if (top <= this.seaLevel + 2) {
-            return SAND;
-        }
-        return biome == LoopTerrain.BIOME_DESERT ? SAND : GRASS_BLOCK;
-    }
-
-    private BlockState seabedState(int biome, int x, int z) {
-        if (biome == LoopTerrain.BIOME_DESERT) {
-            return SAND;
-        }
-        int wrappedX = LoopGeometry.wrapBlock(x, this.radius);
-        int wrappedZ = LoopGeometry.wrapBlock(z, this.radius);
-        long hash = this.seed ^ (wrappedX * 0x9E3779B97F4A7C15L) ^ (wrappedZ * 0xC2B2AE3D27D4EB4FL);
-        hash ^= hash >>> 33;
-        return ((hash >>> 40) & 7) < 5 ? GRAVEL : SAND;
-    }
-
-    // ------------------------------------------------------------------
-    // 装饰：自有、纯周期函数的植被与矿脉（见 LoopDecorator）
-    // ------------------------------------------------------------------
 
     @Override
+    public void addDebugScreenInfo(List<String> info, RandomState randomState, BlockPos pos) {
+        super.addDebugScreenInfo(info, randomState, pos);
+        info.add("SpatialLoop radius: " + this.radius + " chunks");
+    }
+
+    // ------------------------------------------------------------------
+    // 装饰：原版 applyBiomeDecoration 的完整复刻，只把装饰种子折回一个周期
+    // ------------------------------------------------------------------
+
+    /**
+     * 原版流程一字不改：结构 piece 按装饰步放置，然后放置原版/模组注册进生物群系的 placed feature。
+     * 唯一的区别是 {@code setDecorationSeed} 使用折回后的区块原点，所以同一块空间的所有副本
+     * 拿到同一串随机数；feature 的落点仍然用真实区块原点，副本整体平移一个周期。
+     */
+    @Override
     public void applyBiomeDecoration(WorldGenLevel level, ChunkAccess chunk, StructureManager structureManager) {
+        LoopFeatureNoise.push(LoopGeometry.periodBlocks(this.radius));
+        try {
+            this.spatialloop$applyBiomeDecoration(level, chunk, structureManager);
+        } finally {
+            LoopFeatureNoise.pop();
+        }
+    }
+
+    private void spatialloop$applyBiomeDecoration(WorldGenLevel level, ChunkAccess chunk, StructureManager structureManager) {
         ChunkPos chunkPos = chunk.getPos();
         if (SharedConstants.debugVoidTerrain(chunkPos)) {
             return;
         }
-        // 不用原版装饰：原版会读邻居区块、并被邻居的装饰顺序影响，副本之间会出现几十块差异。
-        this.decorator.decorate(level, chunkPos);
+        SectionPos sectionPos = SectionPos.of(chunkPos, level.getMinSection());
+        BlockPos origin = sectionPos.origin();
+        int wrappedX = LoopGeometry.wrapBlock(origin.getX(), this.radius);
+        int wrappedZ = LoopGeometry.wrapBlock(origin.getZ(), this.radius);
+
+        List<FeatureSorter.StepFeatureData> steps = this.featuresPerStep.get();
+        Registry<Structure> structureRegistry = level.registryAccess().registryOrThrow(Registries.STRUCTURE);
+        Map<Integer, List<Structure>> structuresByStep = structureRegistry.stream()
+                .collect(Collectors.groupingBy(structure -> structure.step().ordinal()));
+
+        Set<Holder<Biome>> nearbyBiomes = new ObjectArraySet<>();
+        ChunkPos.rangeClosed(sectionPos.chunk(), 1).forEach(pos -> {
+            ChunkAccess neighbour = level.getChunk(pos.x, pos.z);
+            for (LevelChunkSection section : neighbour.getSections()) {
+                section.getBiomes().getAll(nearbyBiomes::add);
+            }
+        });
+        nearbyBiomes.retainAll(this.biomeSource.possibleBiomes());
+
+        WorldgenRandom random = new WorldgenRandom(new XoroshiroRandomSource(RandomSupport.generateUniqueSeed()));
+        long decorationSeed = random.setDecorationSeed(level.getSeed(), wrappedX, wrappedZ);
+        Registry<PlacedFeature> placedFeatures = level.registryAccess().registryOrThrow(Registries.PLACED_FEATURE);
+        BoundingBox writable = new BoundingBox(
+                chunkPos.getMinBlockX(), level.getMinBuildHeight() + 1, chunkPos.getMinBlockZ(),
+                chunkPos.getMaxBlockX(), level.getMaxBuildHeight() - 1, chunkPos.getMaxBlockZ()
+        );
+
+        try {
+            int stepCount = Math.max(GenerationStep.Decoration.values().length, steps.size());
+            for (int step = 0; step < stepCount; step++) {
+                int structureIndex = 0;
+                if (structureManager.shouldGenerateStructures()) {
+                    for (Structure structure : structuresByStep.getOrDefault(step, List.of())) {
+                        random.setFeatureSeed(decorationSeed, structureIndex, step);
+                        structureManager.startsForStructure(sectionPos, structure)
+                                .forEach(start -> start.placeInChunk(level, structureManager, this, random, writable, chunkPos));
+                        structureIndex++;
+                    }
+                }
+
+                if (step < steps.size()) {
+                    FeatureSorter.StepFeatureData stepData = steps.get(step);
+                    IntSet indices = new IntArraySet();
+                    for (Holder<Biome> biome : nearbyBiomes) {
+                        List<HolderSet<PlacedFeature>> features = biome.value().getGenerationSettings().features();
+                        if (step < features.size()) {
+                            features.get(step).stream().map(Holder::value)
+                                    .forEach(feature -> indices.add(stepData.indexMapping().applyAsInt(feature)));
+                        }
+                    }
+                    int[] sorted = indices.toIntArray();
+                    Arrays.sort(sorted);
+                    for (int index : sorted) {
+                        PlacedFeature feature = stepData.features().get(index);
+                        random.setFeatureSeed(decorationSeed, index, step);
+                        Supplier<String> description = () -> placedFeatures.getResourceKey(feature)
+                                .map(Object::toString)
+                                .orElseGet(feature::toString);
+                        try {
+                            level.setCurrentlyGenerating(description);
+                            feature.placeWithBiomeCheck(level, this, random, origin);
+                        } catch (Exception exception) {
+                            CrashReport report = CrashReport.forThrowable(exception, "Feature placement");
+                            report.addCategory("Feature").setDetail("Description", description::get);
+                            throw new ReportedException(report);
+                        }
+                    }
+                }
+            }
+            level.setCurrentlyGenerating(null);
+        } catch (Exception exception) {
+            CrashReport report = CrashReport.forThrowable(exception, "Biome decoration");
+            report.addCategory("Generation")
+                    .setDetail("CenterX", chunkPos.x)
+                    .setDetail("CenterZ", chunkPos.z)
+                    .setDetail("Decoration Seed", decorationSeed);
+            throw new ReportedException(report);
+        }
     }
 }
