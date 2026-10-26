@@ -33,6 +33,9 @@ sourceSets {
     test {
         java.srcDir '../../common/src/test/java'
         resources.srcDir '../../common/src/test/resources'
+        // 单元测试要直接构造 Minecraft 的 NBT/BlockPos：把 main 的编译/运行类路径挂过来。
+        compileClasspath += sourceSets.main.compileClasspath
+        runtimeClasspath += sourceSets.main.runtimeClasspath
     }
 }
 

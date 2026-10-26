@@ -1,6 +1,7 @@
 package cc.sighs.spatialloop.mixin;
 
 import cc.sighs.spatialloop.world.LoopLevel;
+import cc.sighs.spatialloop.world.LoopRadiusRegistry;
 import cc.sighs.spatialloop.world.SpatialLoopChunkGenerator;
 import java.util.List;
 import java.util.concurrent.Executor;
@@ -63,6 +64,7 @@ public abstract class ServerLevelMixin implements LoopLevel {
         if (stem.generator() instanceof SpatialLoopChunkGenerator generator) {
             this.spatialloop$loopRadius = generator.radius();
         }
+        LoopRadiusRegistry.put(dimension, this.spatialloop$loopRadius);
     }
 
     @Override

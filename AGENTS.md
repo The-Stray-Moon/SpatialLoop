@@ -36,13 +36,14 @@ gradle/target-conventions/       各 target 共用的发布/资源约定
 4. **半径是存档属性**：由 `SpatialLoopChunkGenerator` 的 codec 保存在 level.dat，不要另建全局配置。
 5. **不要传送玩家**：跨过接缝时不做坐标折回/传送，玩家继续往外走即可。循环只由周期生成实现；
    这是用户明确要求的（之前用实体折回做过一版，被否决）。
-6. **区块存档必须折回**：`ChunkStorageMixin` 在读写磁盘时把区块坐标按周期取模，`LoopChunkNbt` 同步平移
-   `xPos`/`zPos`、方块实体和计划刻的绝对坐标。将来若给生成器加结构，结构起点/引用的区块坐标也必须平移。
+6. **区块、实体、POI 存档都必须折回**：`ChunkStorageMixin` 处理区块本体，`SimpleRegionStorageMixin`
+   处理 `entities` / `poi` 两种 `SimpleRegionStorage`；`LoopChunkNbt` 负责平移 `xPos`/`zPos`、方块实体、
+   计划刻、实体 `Position`/`Pos`、POI 记录位置。将来若给生成器加结构，结构起点/引用的区块坐标也必须平移。
    这样磁盘只覆盖 `2r × 2r` 区块，副本读到的是同一份数据。
 7. **出生区不常驻**：`MinecraftServerMixin` 在 `prepareLevels` 结束后释放 `START` 票据。原版会让出生区
    永久加载，和它的同余副本同时存在时保存会互相覆盖。
-8. **已知未折回**：实体与 POI 存档仍按绝对坐标存；两份同余区块被同时加载（`/forceload`、相距一个周期的
-   两个玩家）时内存里是独立对象，后保存的覆盖先保存的。正常游玩时视距/模拟距离都小于周期，不会发生。
+8. **已知限制**：玩家坐标不折回（不传送的直接后果）；`ForcedChunksSavedData`（`/forceload`）等按绝对坐标存；
+   两份同余区块被同时加载时内存里是独立对象，后保存的覆盖先保存的。正常游玩时视距/模拟距离都小于周期，不会发生。
 
 ## 构建
 

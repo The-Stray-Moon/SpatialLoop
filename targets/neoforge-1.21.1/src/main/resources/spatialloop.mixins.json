@@ -11,7 +11,8 @@
     "DistanceManagerMixin",
     "MinecraftServerMixin",
     "ServerChunkCacheMixin",
-    "ServerLevelMixin"
+    "ServerLevelMixin",
+    "SimpleRegionStorageMixin"
   ],
   "client": [
     "CreateWorldScreenMixin",

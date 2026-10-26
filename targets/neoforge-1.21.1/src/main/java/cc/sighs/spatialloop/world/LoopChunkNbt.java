@@ -2,14 +2,17 @@ package cc.sighs.spatialloop.world;
 
 import net.minecraft.core.BlockPos;
 import net.minecraft.nbt.CompoundTag;
+import net.minecraft.nbt.DoubleTag;
+import net.minecraft.nbt.IntArrayTag;
+import net.minecraft.nbt.IntTag;
 import net.minecraft.nbt.ListTag;
 import net.minecraft.nbt.Tag;
 
 /**
- * 区块 NBT 的坐标平移。
+ * 区块级存档 NBT 的坐标平移。
  *
- * <p>区块数据里带绝对坐标的部分必须跟着存档槽一起平移，否则把区块 C+P 的数据读到 C（或反过来）
- * 时，方块实体、计划刻会留在原来的周期里。方块本身用的是区块内相对坐标，不需要处理。
+ * <p>带绝对坐标的部分必须跟着存档槽一起平移，否则把区块 C+P 的数据读到 C（或反过来）时，
+ * 方块实体、计划刻、实体、POI 会留在原来的周期里。方块本身用区块内相对坐标，不需要处理。
  *
  * <p>结构起点/引用也带区块坐标，但本生成器不生成结构（{@code createStructures} 是空实现），
  * 这些标签始终为空；将来若支持结构，必须在这里补上平移。
@@ -18,6 +21,7 @@ public final class LoopChunkNbt {
     private LoopChunkNbt() {
     }
 
+    /** 区块本体：{@code xPos}/{@code zPos}、方块实体、计划刻。 */
     public static void rebase(CompoundTag tag, int deltaChunkX, int deltaChunkZ) {
         if (deltaChunkX == 0 && deltaChunkZ == 0) {
             return;
@@ -41,6 +45,61 @@ public final class LoopChunkNbt {
 
         shiftTicks(tag, "block_ticks", deltaX, deltaZ);
         shiftTicks(tag, "fluid_ticks", deltaX, deltaZ);
+    }
+
+    /** 实体区块：{@code Position}（区块坐标）与每条实体的 {@code Pos}（世界坐标）。 */
+    public static void rebaseEntities(CompoundTag tag, int deltaChunkX, int deltaChunkZ) {
+        if (deltaChunkX == 0 && deltaChunkZ == 0) {
+            return;
+        }
+        int deltaX = deltaChunkX * 16;
+        int deltaZ = deltaChunkZ * 16;
+
+        int[] position = tag.getIntArray("Position");
+        if (position.length == 2) {
+            tag.put("Position", new IntArrayTag(new int[]{position[0] + deltaChunkX, position[1] + deltaChunkZ}));
+        }
+
+        ListTag entities = tag.getList("Entities", Tag.TAG_COMPOUND);
+        for (int i = 0; i < entities.size(); i++) {
+            CompoundTag entity = entities.getCompound(i);
+            ListTag pos = entity.getList("Pos", Tag.TAG_DOUBLE);
+            if (pos.size() >= 3) {
+                pos.set(0, DoubleTag.valueOf(pos.getDouble(0) + deltaX));
+                pos.set(2, DoubleTag.valueOf(pos.getDouble(2) + deltaZ));
+            }
+        }
+    }
+
+    /** POI 区块：{@code Sections.<Y>.Records[].pos}（BlockPos 按 INT_STREAM 编码成 int 列表）。 */
+    public static void rebasePoi(CompoundTag tag, int deltaChunkX, int deltaChunkZ) {
+        if (deltaChunkX == 0 && deltaChunkZ == 0) {
+            return;
+        }
+        int deltaX = deltaChunkX * 16;
+        int deltaZ = deltaChunkZ * 16;
+
+        CompoundTag sections = tag.getCompound("Sections");
+        for (String key : sections.getAllKeys().toArray(String[]::new)) {
+            CompoundTag section = sections.getCompound(key);
+            ListTag records = section.getList("Records", Tag.TAG_COMPOUND);
+            for (int i = 0; i < records.size(); i++) {
+                CompoundTag record = records.getCompound(i);
+                shiftBlockPosTag(record, "pos", deltaX, deltaZ);
+            }
+        }
+    }
+
+    /** BlockPos 在 NBT 里可能是 int 列表（INT_STREAM）或 int 数组，两种都平移。 */
+    private static void shiftBlockPosTag(CompoundTag holder, String key, int deltaX, int deltaZ) {
+        Tag pos = holder.get(key);
+        if (pos instanceof ListTag list && list.size() >= 3 && list.getElementType() == Tag.TAG_INT) {
+            list.set(0, IntTag.valueOf(list.getInt(0) + deltaX));
+            list.set(2, IntTag.valueOf(list.getInt(2) + deltaZ));
+        } else if (pos instanceof IntArrayTag array && array.size() == 3) {
+            int[] values = array.getAsIntArray();
+            holder.put(key, new IntArrayTag(new int[]{values[0] + deltaX, values[1], values[2] + deltaZ}));
+        }
     }
 
     private static void shiftTicks(CompoundTag tag, String key, int deltaX, int deltaZ) {
