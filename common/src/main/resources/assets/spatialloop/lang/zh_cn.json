@@ -1,0 +1,6 @@
+{
+  "spatialloop.create.radius": "空间循环区块半径：%s",
+  "spatialloop.create.radius.off": "关闭",
+  "spatialloop.create.radius.value": "%s 区块（%s 方块）",
+  "spatialloop.create.radius.tooltip": "0 = 关闭。启用后，这片空间东接西、南接北，永远走不到边界；视距会被强制限制在半径以下。"
+}

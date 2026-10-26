@@ -1,0 +1,4 @@
+rootProject.name = 'SpatialLoop'
+
+// IDE: 让仓库根目录也能作为复合构建导入，直接看到 target 与 common 的源码模块。
+includeBuild('targets/neoforge-1.21.1')

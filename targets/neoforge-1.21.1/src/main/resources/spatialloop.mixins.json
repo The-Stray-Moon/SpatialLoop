@@ -1,0 +1,24 @@
+{
+  "required": true,
+  "minVersion": "0.8.5",
+  "package": "cc.sighs.spatialloop.mixin",
+  "compatibilityLevel": "JAVA_21",
+  "mixins": [
+    "ChunkMapMixin",
+    "ChunkStorageMixin",
+    "ClientboundLoginPacketMixin",
+    "ClientboundSetChunkCacheRadiusPacketMixin",
+    "DistanceManagerMixin",
+    "MinecraftServerMixin",
+    "ServerChunkCacheMixin",
+    "ServerLevelMixin"
+  ],
+  "client": [
+    "CreateWorldScreenMixin",
+    "WorldCreationUiStateMixin",
+    "WorldTabMixin"
+  ],
+  "injectors": {
+    "defaultRequire": 1
+  }
+}

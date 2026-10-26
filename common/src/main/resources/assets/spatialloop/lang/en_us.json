@@ -1,0 +1,6 @@
+{
+  "spatialloop.create.radius": "Spatial loop chunk radius: %s",
+  "spatialloop.create.radius.off": "Off",
+  "spatialloop.create.radius.value": "%s chunks (%s blocks)",
+  "spatialloop.create.radius.tooltip": "0 = off. When enabled, east meets west and south meets north with no boundary. View distance is forced below the radius."
+}
