@@ -2,6 +2,7 @@ package cc.sighs.spatialloop.mixin;
 
 import cc.sighs.spatialloop.geometry.LoopGeometry;
 import cc.sighs.spatialloop.world.LoopLevel;
+import cc.sighs.spatialloop.world.LoopLoadingLimits;
 import cc.sighs.spatialloop.world.LoopNoisePeriod;
 import cc.sighs.spatialloop.world.LoopStorage;
 import net.minecraft.core.HolderGetter;
@@ -25,7 +26,7 @@ import org.spongepowered.asm.mixin.injection.callback.CallbackInfo;
  *
  * <ul>
  *   <li>构造时把循环半径写进 {@code ChunkStorage}，让区块存档坐标折回（见 {@link ChunkStorageMixin}）。</li>
- *   <li>把 {@code serverViewDistance} 压到 {@code 半径 - 1}：每个玩家的区块跟踪取
+ *   <li>把 {@code serverViewDistance} 压到预留生成依赖圈后的安全距离：每个玩家的区块跟踪取
  *       {@code min(客户端请求, serverViewDistance)}，压住它，加载、发送、渲染就都跟着收窄。</li>
  * </ul>
  */
@@ -51,7 +52,7 @@ public abstract class ChunkMapMixin {
     @ModifyVariable(method = "setServerViewDistance", at = @At("HEAD"), argsOnly = true)
     private int spatialloop$clampServerViewDistance(int viewDistance) {
         int radius = LoopLevel.radiusOf(this.level);
-        return radius > 0 ? Math.min(viewDistance, LoopGeometry.maxViewDistance(radius)) : viewDistance;
+        return radius > 0 ? Math.min(viewDistance, LoopLoadingLimits.maxDistance(radius)) : viewDistance;
     }
 
     /**

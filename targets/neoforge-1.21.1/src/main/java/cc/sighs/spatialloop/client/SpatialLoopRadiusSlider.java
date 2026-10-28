@@ -1,6 +1,7 @@
 package cc.sighs.spatialloop.client;
 
 import cc.sighs.spatialloop.geometry.LoopGeometry;
+import cc.sighs.spatialloop.world.LoopLoadingLimits;
 import net.minecraft.client.gui.components.AbstractSliderButton;
 import net.minecraft.client.gui.components.Tooltip;
 import net.minecraft.network.chat.Component;
@@ -28,8 +29,7 @@ public class SpatialLoopRadiusSlider extends AbstractSliderButton {
         if (raw <= 0) {
             valueText = Component.translatable("spatialloop.create.radius.off");
         } else {
-            int radius = LoopGeometry.sanitizeRadius(raw);
-            valueText = Component.translatable("spatialloop.create.radius.value", radius, LoopGeometry.periodBlocks(radius));
+            valueText = Component.translatable("spatialloop.create.radius.value", raw, LoopGeometry.periodBlocks(raw));
         }
         this.setMessage(Component.translatable("spatialloop.create.radius", valueText));
     }
@@ -37,10 +37,10 @@ public class SpatialLoopRadiusSlider extends AbstractSliderButton {
     @Override
     protected void applyValue() {
         int raw = (int) Math.round(this.value * LoopGeometry.MAX_RADIUS);
-        int effective = LoopGeometry.sanitizeRadius(raw);
+        int effective = raw <= 0 ? 0 : Math.max(LoopLoadingLimits.minimumRadius(), raw);
         this.holder.spatialloop$setRadius(effective);
         if (effective != raw) {
-            // 1、2 区块半径放不下视距，吸附到可用最小值。
+            // 只在用户选择新值时吸附，不改写已有存档半径。
             this.value = effective / (double) LoopGeometry.MAX_RADIUS;
         }
         this.updateMessage();

@@ -11,8 +11,9 @@ targets/neoforge-1.21.1/         入口、注册、Mixin、客户端界面、met
 gradle/target-conventions/       各 target 共用的发布/资源约定
 ```
 
-- `common` 目前只放纯 Java 的周期几何（`LoopGeometry`）和共享语言文件。这些代码不引用
-  Minecraft 类型，可以脱离游戏单独测试。
+- `common` 放纯 Java 的周期几何（`LoopGeometry`）、交接基础组件（`LoopChunkOwnership`、
+  `LoopWriteBarrier`）和共享语言文件。这些代码不引用 Minecraft 类型，可以脱离游戏单独测试。
+  所有权协调器尚未接入票据/生成流程；存储 mixin 仅跟踪真实 IO future，不能据此宣称绕圈持久化已修复。
 - `targets/neoforge-1.21.1` 放所有 Minecraft / NeoForge 相关实现：`ChunkGenerator`、Mixin、注册与资源。
   地形本身完全来自原版 `NoiseBasedChunkGenerator`（`SpatialLoopChunkGenerator extends NoiseBasedChunkGenerator`），
   生物群系用原版 `multi_noise`，不要再写自有地形/生物群系/噪声模型。
@@ -41,10 +42,11 @@ gradle/target-conventions/       各 target 共用的发布/资源约定
 2. **装饰必须走原版流程**：`applyBiomeDecoration` 按原版逻辑逐装饰步放结构 piece，再放生物群系
    generation settings 里的 placed feature，只把 `setDecorationSeed` 的坐标折回一个周期。不要改成
    自有装饰——那会把原版和其他模组注册的 feature 全部跳过。原版 feature 会读邻居区块、结果与生成顺序
-   有关，副本一致性由存档折回兜底（第一个生成的副本写入 canonical 槽位，之后所有副本读同一份）。
+   有关。存档折回使副本共用 canonical 槽位，但没有所有权交接，不能保证预读或同时生成的副本一致。
 3. **视距严格小于半径**：`LoopGeometry.maxViewDistance(radius) = radius - 1`，服务端
    （`ChunkMap#setServerViewDistance`）与客户端（登录包 / 视距变更包）两侧都要压；模拟距离压到
-   `2r - 1` 以下（`DistanceManagerMixin`），避免同余区块同时处于完整状态。
+   `2r - 1` 以下（`DistanceManagerMixin`）。这些距离限制不能保证同余区块互斥：
+   生成依赖圈、延迟卸载及模拟范围都可能使副本重叠；存档折回不等于内存所有权交接。
 4. **半径是存档属性**：由 `SpatialLoopChunkGenerator` 的 codec 保存在 level.dat，不要另建全局配置。
 5. **不要传送玩家**：跨过接缝时不做坐标折回/传送，玩家继续往外走即可。循环只由周期生成实现；
    这是用户明确要求的（之前用实体折回做过一版，被否决）。
@@ -59,8 +61,17 @@ gradle/target-conventions/       各 target 共用的发布/资源约定
    要塞只取第一个同心环位置折回（全部折回会过密）。
 8. **出生区不常驻**：`MinecraftServerMixin` 在 `prepareLevels` 结束后释放 `START` 票据。原版会让出生区
    永久加载，和它的同余副本同时存在时保存会互相覆盖。
-9. **已知限制**：玩家坐标不折回（不传送的直接后果）；`ForcedChunksSavedData`（`/forceload`）等按绝对坐标存；
-   两份同余区块被同时加载时内存里是独立对象，后保存的覆盖先保存的。正常游玩时视距/模拟距离都小于周期，不会发生。
+9. **已知限制**：玩家坐标不折回（不传送的直接后果）；`ForcedChunksSavedData`（`/forceload`）等按绝对坐标存。
+   运行时代码现于创建 `ChunkGenerationTask` / 取得 generation 引用前原子准入整个原版生成依赖范围；冲突时
+   暂缓任务，旧 holder 走原版 `processUnloads`，实体与 POI 退休后等待区块/实体/POI 的真实写 future。
+   r=16 的隔离 NeoForge 服务端已完成 A→B→C→A→B 五轮 `/forceload` 即时切换：remove 后紧接 add，
+   无预先等待卸载、无中途 save-all；同相位位置逐轮竖直累加到 10 格、箱子累加到 5 件，正常停服重启后全部核验。
+   同步 getChunk 等待期间只提前释放已完成请求留下的 UNKNOWN 保温票据；仍在等待的请求及 PLAYER/FORCED
+   等有效票据不动。此回归不等于玩家连续步行验收，也未覆盖实体/POI 内容、多人冲突和 IO 故障。
+   多人、强加载冲突和 IO/序列化失败会拒绝或阻塞交接，不得丢弃旧写；不同绝对坐标的同余 holder 在内存中仍非共享实例。
+   当前目标版本的 FULL 生成依赖半径为 11，循环世界最低 radius 提升为 16；已有较小半径存档明确拒绝加载，
+   不自动改变存档周期。屏障必须在所有旧生产者停止、最终写入提交后取快照；不得在读 NBT 时等待主线程卸载
+   （生成引用/POI join 会死锁）。
    海底神殿读档时原版会按区块坐标重新生成 piece，副本布局可能与 canonical 略有差异。
    周期噪声用「晶格坐标 + `xo/yo/zo`」的自定义梯度哈希（原版 256 项排列表无法严格周期），
    所以地形是原版风格但不是原版逐块复刻：同一 seed 的地形与纯原版不同。

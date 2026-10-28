@@ -1,6 +1,5 @@
 package cc.sighs.spatialloop.world;
 
-import net.minecraft.core.BlockPos;
 import net.minecraft.nbt.CompoundTag;
 import net.minecraft.nbt.DoubleTag;
 import net.minecraft.nbt.IntArrayTag;
@@ -169,8 +168,9 @@ public final class LoopChunkNbt {
         ListTag ticks = tag.getList(key, Tag.TAG_COMPOUND);
         for (int i = 0; i < ticks.size(); i++) {
             CompoundTag tick = ticks.getCompound(i);
-            BlockPos pos = BlockPos.of(tick.getLong("i"));
-            tick.putLong("i", BlockPos.asLong(pos.getX() + deltaX, pos.getY(), pos.getZ() + deltaZ));
+            // SavedTick 的 i 是注册 ID，坐标分别存放在 x/y/z 中。
+            shiftInt(tick, "x", deltaX);
+            shiftInt(tick, "z", deltaZ);
         }
     }
 }

@@ -1,8 +1,10 @@
 package cc.sighs.spatialloop.mixin;
 
 import cc.sighs.spatialloop.geometry.LoopGeometry;
+import cc.sighs.spatialloop.ownership.LoopWriteBarrier;
 import cc.sighs.spatialloop.world.LoopChunkNbt;
 import cc.sighs.spatialloop.world.LoopRadiusRegistry;
+import cc.sighs.spatialloop.world.LoopStorageBarrier;
 import java.util.Optional;
 import java.util.concurrent.CompletableFuture;
 import net.minecraft.nbt.CompoundTag;
@@ -32,10 +34,23 @@ import org.spongepowered.asm.mixin.injection.callback.CallbackInfoReturnable;
  * 读写时按存档槽的偏移平移，副本读到的实体与 POI 就落在副本自己的坐标上。
  */
 @Mixin(SimpleRegionStorage.class)
-public abstract class SimpleRegionStorageMixin {
+public abstract class SimpleRegionStorageMixin implements LoopStorageBarrier {
+    @org.spongepowered.asm.mixin.Unique
+    private final LoopWriteBarrier spatialloop$writes = new LoopWriteBarrier();
+
     @Shadow
     @Final
     private IOWorker worker;
+
+    @Override
+    public CompletableFuture<Void> spatialloop$writeBarrier(ChunkPos pos) {
+        RegionStorageInfo info = ((SimpleRegionStorage) (Object) this).storageInfo();
+        int radius = LoopRadiusRegistry.get(info.dimension());
+        if (radius <= 0 || !isFoldable(info.type())) {
+            return CompletableFuture.completedFuture(null);
+        }
+        return this.spatialloop$writes.snapshot(wrap(pos, radius).toLong());
+    }
 
     @Inject(method = "read", at = @At("HEAD"), cancellable = true)
     private void spatialloop$readCanonical(
@@ -49,12 +64,10 @@ public abstract class SimpleRegionStorageMixin {
             return;
         }
         ChunkPos canonical = wrap(pos, radius);
-        if (canonical.equals(pos)) {
-            return;
-        }
         cir.setReturnValue(this.worker.loadAsync(canonical).thenApply(optional -> optional.map(tag -> {
-            rebase(type, tag, pos.x - canonical.x, pos.z - canonical.z);
-            return tag;
+            CompoundTag copy = tag.copy();
+            rebase(type, copy, pos.x - canonical.x, pos.z - canonical.z);
+            return copy;
         })));
     }
 
@@ -71,15 +84,14 @@ public abstract class SimpleRegionStorageMixin {
             return;
         }
         ChunkPos canonical = wrap(pos, radius);
-        if (canonical.equals(pos)) {
-            return;
-        }
-        if (tag == null) {
-            cir.setReturnValue(this.worker.store(canonical, null));
-            return;
-        }
-        rebase(type, tag, canonical.x - pos.x, canonical.z - pos.z);
-        cir.setReturnValue(this.worker.store(canonical, tag));
+        cir.setReturnValue(this.spatialloop$writes.submit(canonical.toLong(), () -> {
+            CompoundTag copy = tag == null ? null : tag.copy();
+            if (copy != null) {
+                rebase(type, copy, canonical.x - pos.x, canonical.z - pos.z);
+            }
+            // canonical 路径和删除也跟踪真实 IO；这里只观测，不等待或交接内存副本。
+            return this.worker.store(canonical, copy);
+        }));
     }
 
     private static boolean isFoldable(String type) {

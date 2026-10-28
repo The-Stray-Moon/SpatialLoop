@@ -1,5 +1,6 @@
 package cc.sighs.spatialloop.mixin;
 
+import cc.sighs.spatialloop.world.LoopLoadingLimits;
 import cc.sighs.spatialloop.world.LoopSimulation;
 import net.minecraft.server.level.DistanceManager;
 import org.spongepowered.asm.mixin.Mixin;
@@ -8,7 +9,7 @@ import org.spongepowered.asm.mixin.injection.At;
 import org.spongepowered.asm.mixin.injection.ModifyVariable;
 
 /**
- * 模拟距离压到周期以下，保证同余的两块区块不会同时处于完整/模拟状态。
+ * 模拟距离压到周期以下以限制模拟范围；这不能保证同余区块互斥。
  *
  * <p>半径由 {@code ServerChunkCache} 构造时写入（见 {@link ServerChunkCacheMixin}）。
  */
@@ -23,8 +24,8 @@ public abstract class DistanceManagerMixin implements LoopSimulation {
         if (radius <= 0) {
             return value;
         }
-        // 周期是 2r 区块；只要加载半径 < 2r，就不会有两块同余区块同时存在。
-        return Math.min(value, 2 * radius - 1);
+        // 这是距离上限，不是互斥保证：加载范围的直径及延迟卸载仍可能覆盖同余副本。
+        return Math.min(value, LoopLoadingLimits.maxDistance(radius));
     }
 
     @Override

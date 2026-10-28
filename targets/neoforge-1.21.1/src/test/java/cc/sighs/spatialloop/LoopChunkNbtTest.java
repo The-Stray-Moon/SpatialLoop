@@ -11,6 +11,8 @@ import net.minecraft.nbt.IntTag;
 import net.minecraft.nbt.ListTag;
 import net.minecraft.nbt.Tag;
 import net.minecraft.world.level.ChunkPos;
+import net.minecraft.world.ticks.SavedTick;
+import net.minecraft.world.ticks.TickPriority;
 import org.junit.jupiter.api.Test;
 
 /** 存档 NBT 的坐标平移：格式错了就会把方块实体/实体/POI/结构留在别的周期里。 */
@@ -29,11 +31,10 @@ class LoopChunkNbtTest {
         blockEntities.add(chest);
         tag.put("block_entities", blockEntities);
 
-        CompoundTag tick = new CompoundTag();
-        tick.putLong("i", BlockPos.asLong(1607, -60, 5));
-        tick.putString("i_type", "minecraft:water");
+        SavedTick<String> tick = new SavedTick<>(
+                "minecraft:water", new BlockPos(1607, -60, 5), 13, TickPriority.HIGH);
         ListTag ticks = new ListTag();
-        ticks.add(tick);
+        ticks.add(tick.save(id -> id));
         tag.put("fluid_ticks", ticks);
 
         LoopChunkNbt.rebase(tag, -96, 0);
@@ -43,10 +44,36 @@ class LoopChunkNbtTest {
         CompoundTag movedChest = tag.getList("block_entities", Tag.TAG_COMPOUND).getCompound(0);
         assertEquals(69, movedChest.getInt("x"));
         assertEquals(5, movedChest.getInt("z"));
-        assertEquals(
-                BlockPos.asLong(71, -60, 5),
-                tag.getList("fluid_ticks", Tag.TAG_COMPOUND).getCompound(0).getLong("i")
-        );
+        CompoundTag movedTick = tag.getList("fluid_ticks", Tag.TAG_COMPOUND).getCompound(0);
+        assertEquals("minecraft:water", movedTick.getString("i"));
+        assertEquals(new SavedTick<>("minecraft:water", new BlockPos(71, -60, 5), 13, TickPriority.HIGH),
+                SavedTick.loadTick(movedTick, java.util.Optional::of).orElseThrow());
+    }
+
+    @Test
+    void realSavedTicksSurviveBothAxisTranslationAndRoundTrip() {
+        for (String key : new String[]{"block_ticks", "fluid_ticks"}) {
+            String id = key.equals("block_ticks") ? "minecraft:repeater" : "minecraft:water";
+            SavedTick<String> tick = new SavedTick<>(id, new BlockPos(-17, 230, 1041), 41, TickPriority.LOW);
+            CompoundTag tag = new CompoundTag();
+            ListTag ticks = new ListTag();
+            ticks.add(tick.save(value -> value));
+            tag.put(key, ticks);
+            CompoundTag original = tag.copy();
+
+            LoopChunkNbt.rebase(tag, 32, -64);
+
+            CompoundTag moved = tag.getList(key, Tag.TAG_COMPOUND).getCompound(0);
+            assertEquals(new SavedTick<>(id, new BlockPos(495, 230, 17), 41, TickPriority.LOW),
+                    SavedTick.loadTick(moved, java.util.Optional::of).orElseThrow());
+            java.util.List<SavedTick<String>> loaded = new java.util.ArrayList<>();
+            SavedTick.loadTickList(tag.getList(key, Tag.TAG_COMPOUND), java.util.Optional::of,
+                    new ChunkPos(30, 1), loaded::add);
+            assertEquals(1, loaded.size());
+
+            LoopChunkNbt.rebase(tag, -32, 64);
+            assertEquals(original, tag);
+        }
     }
 
     @Test

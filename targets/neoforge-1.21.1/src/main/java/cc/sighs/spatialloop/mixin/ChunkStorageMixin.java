@@ -1,6 +1,8 @@
 package cc.sighs.spatialloop.mixin;
 
 import cc.sighs.spatialloop.geometry.LoopGeometry;
+import cc.sighs.spatialloop.ownership.LoopWriteBarrier;
+import cc.sighs.spatialloop.world.LoopStorageBarrier;
 import cc.sighs.spatialloop.world.LoopChunkNbt;
 import cc.sighs.spatialloop.world.LoopStorage;
 import java.util.Optional;
@@ -24,13 +26,22 @@ import org.spongepowered.asm.mixin.injection.callback.CallbackInfoReturnable;
  * 按玩家做坐标翻译；只折存档则保留原版所有坐标语义（方块实体位置、实体位置、发包位置都是玩家
  * 看到的绝对坐标），只需要在 NBT 进出磁盘时把绝对坐标一起平移。
  *
- * <p>效果：区域文件永远只覆盖折回后的 {@code 2r × 2r} 个区块；玩家在 C 处破坏的方块会随区块卸载
- * 写进 canonical 槽位，之后走到 C+P、C+2P 等副本时读到的是同一份数据。
+ * <p>效果：区域文件只覆盖折回后的 {@code 2r × 2r} 个区块，副本共用 canonical 槽位。
+ * 已跟踪真实写入屏障，但尚未接入内存副本交接；预读快照及迟到保存仍可能导致绕圈时修改丢失。
  */
 @Mixin(ChunkStorage.class)
-public abstract class ChunkStorageMixin implements LoopStorage {
+public abstract class ChunkStorageMixin implements LoopStorage, LoopStorageBarrier {
+    @Unique
+    private final LoopWriteBarrier spatialloop$writes = new LoopWriteBarrier();
+
     @Unique
     private int spatialloop$chunkRadius;
+
+    @Override
+    public CompletableFuture<Void> spatialloop$writeBarrier(ChunkPos pos) {
+        int radius = this.spatialloop$chunkRadius;
+        return this.spatialloop$writes.snapshot((radius > 0 ? wrap(pos, radius) : pos).toLong());
+    }
 
     @Shadow
     @Final
@@ -46,13 +57,11 @@ public abstract class ChunkStorageMixin implements LoopStorage {
             return;
         }
         ChunkPos canonical = wrap(pos, radius);
-        if (canonical.equals(pos)) {
-            return;
-        }
         cir.setReturnValue(this.worker.loadAsync(canonical).thenApply(optional -> optional.map(tag -> {
-            // canonical 空间 → 请求坐标空间
-            LoopChunkNbt.rebase(tag, pos.x - canonical.x, pos.z - canonical.z);
-            return tag;
+            CompoundTag copy = tag.copy();
+            // canonical 空间 → 请求坐标空间；不要平移 IO 层持有的快照。
+            LoopChunkNbt.rebase(copy, pos.x - canonical.x, pos.z - canonical.z);
+            return copy;
         })));
     }
 
@@ -84,18 +93,15 @@ public abstract class ChunkStorageMixin implements LoopStorage {
             return;
         }
         ChunkPos canonical = wrap(pos, radius);
-        if (canonical.equals(pos)) {
-            return;
-        }
-        if (tag == null) {
-            // 删除副本时清掉 canonical 槽位：同一块空间只有一份数据。
-            cir.setReturnValue(this.worker.store(canonical, null));
-            return;
-        }
-        // 请求坐标空间 → canonical 空间（tag 是这次保存新生成的对象，可以原地平移）
-        LoopChunkNbt.rebase(tag, canonical.x - pos.x, canonical.z - pos.z);
-        // 不调用 handleLegacyStructureIndex：新世界没有 1.12 之前的结构索引数据。
-        cir.setReturnValue(this.worker.store(canonical, tag));
+        cir.setReturnValue(this.spatialloop$writes.submit(canonical.toLong(), () -> {
+            CompoundTag copy = tag == null ? null : tag.copy();
+            if (copy != null) {
+                LoopChunkNbt.rebase(copy, canonical.x - pos.x, canonical.z - pos.z);
+            }
+            // canonical 路径和删除也必须覆盖；不以 exceptionally 恢复后的 future 作为屏障。
+            // 循环新世界没有 1.12 之前的结构索引数据，无需 handleLegacyStructureIndex。
+            return this.worker.store(canonical, copy);
+        }));
     }
 
     @Override

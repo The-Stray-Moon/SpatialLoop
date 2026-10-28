@@ -1,6 +1,7 @@
 package cc.sighs.spatialloop.mixin;
 
 import cc.sighs.spatialloop.client.LoopRadiusHolder;
+import cc.sighs.spatialloop.world.LoopLoadingLimits;
 import cc.sighs.spatialloop.world.SpatialLoopChunkGenerator;
 import java.nio.file.Path;
 import java.util.Optional;
@@ -25,7 +26,7 @@ import org.spongepowered.asm.mixin.injection.callback.CallbackInfo;
 @Mixin(WorldCreationUiState.class)
 public abstract class WorldCreationUiStateMixin implements LoopRadiusHolder {
     @Unique
-    private int spatialloop$radius;
+    private int spatialloop$radius = LoopLoadingLimits.minimumRadius();
 
     @Inject(method = "<init>", at = @At("TAIL"))
     private void spatialloop$readExistingRadius(
