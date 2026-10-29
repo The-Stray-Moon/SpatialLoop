@@ -7,12 +7,26 @@ import static org.junit.jupiter.api.Assertions.assertTrue;
 
 import org.junit.jupiter.api.Test;
 
+/**
+ * 视距上限不是拍脑袋的余量：{@code ChunkLevel.MAX_LEVEL} 比玩家加载票据等级
+ * （ENTITY_TICKING = 31）多保留 13 格 holder；两倍持有半径必须小于一个周期。
+ *
+ * <p>{@code ChunkStatus}/{@code ChunkLevel} 的静态初始化需要注册表 bootstrap，单元测试里读不到，
+ * 所以「13 = MAX_LEVEL - 31」与「生成依赖半径 = 11」由 {@code ChunkMapOwnershipMixin} 在真实
+ * 服务端构造维度时用 {@code LoopGenerationReach.forStatus(FULL)} 现场核对；这里钉住公式结果。
+ */
 class LoopLoadingLimitsTest {
 
     @Test
-    void limitsReserveThePinnedVersionGenerationDependencyRadius() {
+    void limitsFollowTheGenerationHalo() {
+        assertEquals(11, LoopLoadingLimits.pinnedGenerationRadius());
+        assertEquals(13, LoopLoadingLimits.loadedHaloRadius());
         assertEquals(16, LoopLoadingLimits.minimumRadius());
+        // viewDistance + halo < radius
+        assertEquals(2, LoopLoadingLimits.maxDistance(16));
+        assertEquals(15, LoopLoadingLimits.maxDistance(29));
         assertEquals(18, LoopLoadingLimits.maxDistance(32));
+        assertEquals(18, LoopLoadingLimits.defaultRadius() - LoopLoadingLimits.loadedHaloRadius() - 1);
     }
 
     @Test

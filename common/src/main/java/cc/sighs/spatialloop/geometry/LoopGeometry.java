@@ -80,15 +80,6 @@ public final class LoopGeometry {
         return Math.floorMod(block + radius * CHUNK_SIZE, period) - radius * CHUNK_SIZE;
     }
 
-    /**
-     * 强制视距：必须严格小于半径，否则玩家能同时看到接缝两侧的同一处地形。
-     *
-     * @return 允许的最大视距（区块）
-     */
-    public static int maxViewDistance(int radius) {
-        return Math.max(1, radius - 1);
-    }
-
     /** 以 {@code period} 为周期把方块坐标映射到 {@code [0, 1)}，供周期噪声采样。 */
     public static double unit(int block, int period) {
         return (double) Math.floorMod(block, period) / (double) period;

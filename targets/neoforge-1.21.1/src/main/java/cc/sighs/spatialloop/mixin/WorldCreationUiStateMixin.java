@@ -26,7 +26,7 @@ import org.spongepowered.asm.mixin.injection.callback.CallbackInfo;
 @Mixin(WorldCreationUiState.class)
 public abstract class WorldCreationUiStateMixin implements LoopRadiusHolder {
     @Unique
-    private int spatialloop$radius = LoopLoadingLimits.minimumRadius();
+    private int spatialloop$radius = LoopLoadingLimits.defaultRadius();
 
     @Inject(method = "<init>", at = @At("TAIL"))
     private void spatialloop$readExistingRadius(

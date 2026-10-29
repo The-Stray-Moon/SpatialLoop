@@ -32,6 +32,8 @@ import net.minecraft.world.level.ChunkPos;
 import net.minecraft.world.level.chunk.ChunkAccess;
 import net.minecraft.world.level.chunk.status.ChunkStatus;
 import net.minecraft.world.level.chunk.storage.RegionStorageInfo;
+import org.slf4j.Logger;
+import org.slf4j.LoggerFactory;
 import org.spongepowered.asm.mixin.Final;
 import org.spongepowered.asm.mixin.Mixin;
 import org.spongepowered.asm.mixin.Shadow;
@@ -45,6 +47,8 @@ import org.spongepowered.asm.mixin.injection.callback.CallbackInfoReturnable;
 /** 票据可创建空 holder，但生成任务取得依赖引用之前必须整圈准入。 */
 @Mixin(ChunkMap.class)
 public abstract class ChunkMapOwnershipMixin implements LoopGenerationAdmission {
+    private static final Logger LOGGER = LoggerFactory.getLogger("SpatialLoop");
+
     @Shadow @Final private Long2ObjectLinkedOpenHashMap<ChunkHolder> updatingChunkMap;
     @Shadow @Final private Long2ObjectLinkedOpenHashMap<ChunkHolder> pendingUnloads;
     @Shadow @Final private LongSet toDrop;
@@ -55,14 +59,37 @@ public abstract class ChunkMapOwnershipMixin implements LoopGenerationAdmission 
 
     @Unique private final LoopChunkOwnership spatialloop$ownership = new LoopChunkOwnership();
     @Unique private final Map<Long, LoopChunkOwner> spatialloop$owners = new LinkedHashMap<>();
+    /** 已观察到卸载、正在等实体/写入屏障的 owner；pump 只扫这一小集合，不扫全部 owner。 */
+    @Unique private final Map<Long, LoopChunkOwner> spatialloop$retiring = new LinkedHashMap<>();
     @Unique private final Map<GenerationChunkHolder, LoopPendingGeneration> spatialloop$pending = new LinkedHashMap<>();
+    @Unique private long spatialloop$nextPendingAttempt;
     @Unique private boolean spatialloop$pumping;
     @Unique private boolean spatialloop$pausedForNoSave;
     @Unique private volatile Throwable spatialloop$failure;
 
     @Inject(method = "<init>", at = @At("RETURN"))
     private void spatialloop$validateRadius(CallbackInfo ci) {
-        LoopLoadingLimits.validateRadius(LoopLevel.radiusOf(this.level));
+        int radius = LoopLevel.radiusOf(this.level);
+        LoopLoadingLimits.validateRadius(radius);
+        if (radius <= 0) {
+            return;
+        }
+        // 视距公式钉死了目标版本的原版生成依赖半径；版本升级后这里先失败，避免静默算错。
+        int fullReach = LoopGenerationReach.forStatus(ChunkStatus.FULL);
+        if (fullReach != LoopLoadingLimits.pinnedGenerationRadius()) {
+            throw new IllegalStateException("SpatialLoop view distance math is pinned to FULL reach "
+                    + LoopLoadingLimits.pinnedGenerationRadius() + " but this game reports " + fullReach
+                    + "; update LoopLoadingLimits before opening a loop world.");
+        }
+        LOGGER.info(
+                "SpatialLoop {}: radius={} chunks, period={} blocks, generation halo={}, "
+                        + "max view/simulation distance={} chunks",
+                this.level.dimension().location(),
+                radius,
+                LoopGeometry.periodBlocks(radius),
+                LoopLoadingLimits.loadedHaloRadius(),
+                LoopLoadingLimits.maxDistance(radius)
+        );
     }
 
     @Override
@@ -149,53 +176,74 @@ public abstract class ChunkMapOwnershipMixin implements LoopGenerationAdmission 
                 }
                 this.spatialloop$pausedForNoSave = false;
             }
-            // pollTask -> runDistanceManagerUpdates -> runGenerationTasks 也到达此处。
-            // 不伪造票据、不强删 holder；原版降级会取消任务并归还 generation 引用。
-            if (!this.toDrop.isEmpty() || !this.pendingUnloads.isEmpty()) {
-                this.processUnloads(() -> true);
+            // runGenerationTasks 会被 ServerChunkCache.MainThreadExecutor.pollTask 在 managedBlock
+            // 忙等循环里反复调用（同步 getChunk 每秒可达上千次），所以这里只能做 O(待退休) 的小工作，
+            // 不能每次扫全部 owner 或重试全部 pending。
+            boolean unloadWork = !this.toDrop.isEmpty() || !this.pendingUnloads.isEmpty();
+            boolean retireWork = !this.spatialloop$retiring.isEmpty();
+            LoopRetirementAccess entities = null;
+            if (unloadWork || retireWork) {
+                // 不伪造票据、不强删 holder；原版降级会取消任务并归还 generation 引用。
+                if (unloadWork) {
+                    this.processUnloads(() -> true);
+                }
+                entities = (LoopRetirementAccess) this.level;
+                entities.spatialloop$pumpEntities();
+                spatialloop$checkThreadAndFailure();
             }
-            LoopRetirementAccess entities = (LoopRetirementAccess) this.level;
-            entities.spatialloop$pumpEntities();
-            spatialloop$checkThreadAndFailure();
-            for (LoopChunkOwner owner : List.copyOf(this.spatialloop$owners.values())) {
-                var state = this.spatialloop$ownership.snapshot(owner.token().canonical());
-                if (state.isEmpty()) {
-                    this.spatialloop$owners.remove(owner.token().canonical(), owner);
-                    continue;
-                }
-                if (state.get().state() == LoopChunkOwnership.State.FAILED) {
-                    throw new IllegalStateException("SpatialLoop refused handoff after storage failure at "
-                            + owner.holder().getPos(), state.get().failure());
-                }
-                if (owner.unloaded() && state.get().state() == LoopChunkOwnership.State.ACTIVE) {
-                    this.spatialloop$ownership.beginRetirement(owner.token());
-                }
-                if (owner.unloaded() && this.spatialloop$ownership.snapshot(owner.token().canonical()).orElseThrow().state()
-                        == LoopChunkOwnership.State.RETIRING && entities.spatialloop$entitiesRetired(owner.holder().getPos())) {
-                    ChunkPos pos = owner.holder().getPos();
-                    CompletableFuture<Void> poi = ((LoopPoiRetirement) this.poiManager).spatialloop$retirePoi(pos);
-                    CompletableFuture<Void> saved = CompletableFuture.allOf(
-                            ((LoopStorageBarrier) this).spatialloop$writeBarrier(pos),
-                            entities.spatialloop$entityWriteBarrier(pos), poi);
-                    this.spatialloop$ownership.flush(owner.token(), saved);
+            if (retireWork) {
+                for (LoopChunkOwner owner : List.copyOf(this.spatialloop$retiring.values())) {
+                    long canonical = owner.token().canonical();
+                    var snapshot = this.spatialloop$ownership.snapshot(canonical);
+                    if (snapshot.isEmpty()) {
+                        // flush 成功后协调器已释放 canonical；这里把两个索引一起清掉。
+                        this.spatialloop$owners.remove(canonical, owner);
+                        this.spatialloop$retiring.remove(canonical, owner);
+                        continue;
+                    }
+                    LoopChunkOwnership.State state = snapshot.get().state();
+                    if (state == LoopChunkOwnership.State.FAILED) {
+                        throw new IllegalStateException("SpatialLoop refused handoff after storage failure at "
+                                + owner.holder().getPos(), snapshot.get().failure());
+                    }
+                    if (state == LoopChunkOwnership.State.ACTIVE) {
+                        if (!this.spatialloop$ownership.beginRetirement(owner.token())) {
+                            continue;
+                        }
+                        state = LoopChunkOwnership.State.RETIRING;
+                    }
+                    if (state == LoopChunkOwnership.State.RETIRING
+                            && entities.spatialloop$entitiesRetired(owner.holder().getPos())) {
+                        ChunkPos pos = owner.holder().getPos();
+                        CompletableFuture<Void> poi = ((LoopPoiRetirement) this.poiManager).spatialloop$retirePoi(pos);
+                        CompletableFuture<Void> saved = CompletableFuture.allOf(
+                                ((LoopStorageBarrier) this).spatialloop$writeBarrier(pos),
+                                entities.spatialloop$entityWriteBarrier(pos), poi);
+                        this.spatialloop$ownership.flush(owner.token(), saved);
+                    }
                 }
             }
-            for (var entry : List.copyOf(this.spatialloop$pending.entrySet())) {
-                GenerationChunkHolder holder = entry.getKey();
-                LoopPendingGeneration pending = entry.getValue();
-                ChunkStatus allowed = ChunkLevel.generationStatus(holder.getTicketLevel());
-                if (this.updatingChunkMap.get(holder.getPos().toLong()) != holder || allowed == null
-                        || pending.status().isAfter(allowed)) {
-                    this.spatialloop$pending.remove(holder);
-                    continue;
-                }
-                if (spatialloop$admit(holder, pending.status())) {
-                    holder.scheduleChunkGenerationTask(pending.status(), (ChunkMap) (Object) this);
-                } else if (System.nanoTime() - pending.since() > 120_000_000_000L) {
-                    throw new IllegalStateException("SpatialLoop handoff blocked for 120 seconds at " + holder.getPos()
-                            + " requesting " + pending.status() + ": " + spatialloop$blockedReason(holder, pending.status())
-                            + "; overlapping active tickets, multiple distant players, forced chunks or reentrant chunk loading are unsupported. "
-                            + "No old chunk was discarded. Reduce the active range or restore a backup; the saved period was not changed.");
+            long now = System.nanoTime();
+            if (!this.spatialloop$pending.isEmpty()
+                    && now - this.spatialloop$nextPendingAttempt >= 20_000_000L) {
+                this.spatialloop$nextPendingAttempt = now;
+                for (var entry : List.copyOf(this.spatialloop$pending.entrySet())) {
+                    GenerationChunkHolder holder = entry.getKey();
+                    LoopPendingGeneration pending = entry.getValue();
+                    ChunkStatus allowed = ChunkLevel.generationStatus(holder.getTicketLevel());
+                    if (this.updatingChunkMap.get(holder.getPos().toLong()) != holder || allowed == null
+                            || pending.status().isAfter(allowed)) {
+                        this.spatialloop$pending.remove(holder);
+                        continue;
+                    }
+                    if (spatialloop$admit(holder, pending.status())) {
+                        holder.scheduleChunkGenerationTask(pending.status(), (ChunkMap) (Object) this);
+                    } else if (now - pending.since() > 120_000_000_000L) {
+                        throw new IllegalStateException("SpatialLoop handoff blocked for 120 seconds at " + holder.getPos()
+                                + " requesting " + pending.status() + ": " + spatialloop$blockedReason(holder, pending.status())
+                                + "; overlapping active tickets, multiple distant players, forced chunks or reentrant chunk loading are unsupported. "
+                                + "No old chunk was discarded. Reduce the active range or restore a backup; the saved period was not changed.");
+                    }
                 }
             }
         } finally {
@@ -217,6 +265,7 @@ public abstract class ChunkMapOwnershipMixin implements LoopGenerationAdmission 
                     LoopChunkOwner owner = this.spatialloop$owners.get(canonical);
                     if (owner != null && owner.holder() == holder) {
                         owner.markUnloaded();
+                        this.spatialloop$retiring.putIfAbsent(canonical, owner);
                     }
                 }
             } catch (Throwable failure) {

@@ -64,6 +64,10 @@ public abstract class SimpleRegionStorageMixin implements LoopStorageBarrier {
             return;
         }
         ChunkPos canonical = wrap(pos, radius);
+        if (canonical.equals(pos)) {
+            // canonical 读取不需要平移；交给原版，避免深拷贝实体/POI NBT。
+            return;
+        }
         cir.setReturnValue(this.worker.loadAsync(canonical).thenApply(optional -> optional.map(tag -> {
             CompoundTag copy = tag.copy();
             rebase(type, copy, pos.x - canonical.x, pos.z - canonical.z);

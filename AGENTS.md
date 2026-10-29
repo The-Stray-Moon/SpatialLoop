@@ -43,10 +43,14 @@ gradle/target-conventions/       各 target 共用的发布/资源约定
    generation settings 里的 placed feature，只把 `setDecorationSeed` 的坐标折回一个周期。不要改成
    自有装饰——那会把原版和其他模组注册的 feature 全部跳过。原版 feature 会读邻居区块、结果与生成顺序
    有关。存档折回使副本共用 canonical 槽位，但没有所有权交接，不能保证预读或同时生成的副本一致。
-3. **视距严格小于半径**：`LoopGeometry.maxViewDistance(radius) = radius - 1`，服务端
-   （`ChunkMap#setServerViewDistance`）与客户端（登录包 / 视距变更包）两侧都要压；模拟距离压到
-   `2r - 1` 以下（`DistanceManagerMixin`）。这些距离限制不能保证同余区块互斥：
-   生成依赖圈、延迟卸载及模拟范围都可能使副本重叠；存档折回不等于内存所有权交接。
+3. **视距上限是 `半径 - 14`，不是 `半径 - 1`**：原版玩家票据等级是 31（ENTITY_TICKING），
+   而 `ChunkLevel.MAX_LEVEL = 33 + FULL 生成依赖半径(11) = 44`；票据等级每向外一格 +1，
+   持有圈比票据方形每边多 13 格。同余互斥要求 `2 × (视距 + 13) < 2r`，即 `视距 ≤ r - 14`
+   （`LoopLoadingLimits.maxDistance`）。服务端（`ChunkMap#setServerViewDistance`）、客户端
+   （登录包 / 视距变更包，`SpatialLoopViewDistance`）和模拟距离（`DistanceManagerMixin`）
+   必须用同一个上限；客户端单独放宽只会画出没有区块的空洞，且会重新引入两份可写副本。
+   半径 16 → 视距 2，半径 32 → 18。`LoopLoadingLimits` 里的 11 由
+   `ChunkMapOwnershipMixin` 在加载循环维度时用 `LoopGenerationReach.forStatus(FULL)` 现场核对。
 4. **半径是存档属性**：由 `SpatialLoopChunkGenerator` 的 codec 保存在 level.dat，不要另建全局配置。
 5. **不要传送玩家**：跨过接缝时不做坐标折回/传送，玩家继续往外走即可。循环只由周期生成实现；
    这是用户明确要求的（之前用实体折回做过一版，被否决）。
@@ -69,9 +73,13 @@ gradle/target-conventions/       各 target 共用的发布/资源约定
    同步 getChunk 等待期间只提前释放已完成请求留下的 UNKNOWN 保温票据；仍在等待的请求及 PLAYER/FORCED
    等有效票据不动。此回归不等于玩家连续步行验收，也未覆盖实体/POI 内容、多人冲突和 IO 故障。
    多人、强加载冲突和 IO/序列化失败会拒绝或阻塞交接，不得丢弃旧写；不同绝对坐标的同余 holder 在内存中仍非共享实例。
-   当前目标版本的 FULL 生成依赖半径为 11，循环世界最低 radius 提升为 16；已有较小半径存档明确拒绝加载，
-   不自动改变存档周期。屏障必须在所有旧生产者停止、最终写入提交后取快照；不得在读 NBT 时等待主线程卸载
+   当前目标版本的 FULL 生成依赖半径为 11，循环世界最低 radius 提升为 16（视距下限 2），
+   新建世界默认 32（视距 18）；已有较小半径存档明确拒绝加载，不自动改变存档周期。屏障必须在所有旧生产者停止、最终写入提交后取快照；不得在读 NBT 时等待主线程卸载
    （生成引用/POI join 会死锁）。
+   `runGenerationTasks` 会被 `ServerChunkCache.MainThreadExecutor.pollTask` 在 `managedBlock`
+   忙等里反复调用，交接 pump 必须只做 O(待退休) 的小工作：不得每次扫全部 owner、不得每次重试全部
+   pending（现为 20 ms 节流）。canonical 位置的区块/实体/POI 读写不要深拷贝 NBT（只有折回路径需要
+   复制后平移）；`LoopNoise` 每样本不要重算 `Math.pow`，梯度盐必须缓存（`ImprovedNoiseSaltMixin`）。
    海底神殿读档时原版会按区块坐标重新生成 piece，副本布局可能与 canonical 略有差异。
    周期噪声用「晶格坐标 + `xo/yo/zo`」的自定义梯度哈希（原版 256 项排列表无法严格周期），
    所以地形是原版风格但不是原版逐块复刻：同一 seed 的地形与纯原版不同。

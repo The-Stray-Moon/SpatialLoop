@@ -28,6 +28,18 @@ public final class LoopNoise {
             {1, 1, 0}, {0, -1, 1}, {-1, 1, 0}, {0, -1, -1}
     };
 
+    /**
+     * {@code PerlinNoise} 每层八度的起始振幅系数 {@code 2^(n-1)/(2^n-1)}。
+     * 原版在构造时算一次；这里按八度数预计算成表，避免每次采样都调用 {@code Math.pow}。
+     */
+    private static final double[] LAYER_VALUE_FACTOR = new double[33];
+
+    static {
+        for (int levels = 1; levels < LAYER_VALUE_FACTOR.length; levels++) {
+            LAYER_VALUE_FACTOR[levels] = Math.pow(2.0, levels - 1) / (Math.pow(2.0, levels) - 1.0);
+        }
+    }
+
     private LoopNoise() {
     }
 
@@ -70,7 +82,9 @@ public final class LoopNoise {
         int count = levels.length;
         double value = 0.0;
         // 与 PerlinNoise 一致：2^(n-1) / (2^n - 1) 起步，逐层减半。
-        double valueFactor = Math.pow(2.0, count - 1) / (Math.pow(2.0, count) - 1.0);
+        double valueFactor = count > 0 && count < LAYER_VALUE_FACTOR.length
+                ? LAYER_VALUE_FACTOR[count]
+                : Math.pow(2.0, count - 1) / (Math.pow(2.0, count) - 1.0);
         for (int i = 0; i < count; i++) {
             double amplitude = i < amplitudes.size() ? amplitudes.getDouble(i) : 0.0;
             ImprovedNoise level = levels[i];
@@ -132,10 +146,20 @@ public final class LoopNoise {
     }
 
     private static long salt(ImprovedNoise level) {
-        long hash = mix64(Double.doubleToLongBits(level.xo));
-        hash = mix64(hash ^ Double.doubleToLongBits(level.yo));
-        hash = mix64(hash ^ Double.doubleToLongBits(level.zo));
-        return hash;
+        // 游戏内由 ImprovedNoiseSaltMixin 缓存；单元测试（无 mixin 变换）退回逐次计算。
+        // ImprovedNoise 是 final 且编译期不实现该接口，所以先退到 Object 再判断。
+        Object raw = level;
+        if (raw instanceof LoopNoiseSalt cached) {
+            return cached.spatialloop$salt();
+        }
+        return hashSalt(level.xo, level.yo, level.zo);
+    }
+
+    /** 由 {@code xo/yo/zo} 派生该层噪声的梯度盐；mixin 用它做一次性缓存。 */
+    public static long hashSalt(double xo, double yo, double zo) {
+        long hash = mix64(Double.doubleToLongBits(xo));
+        hash = mix64(hash ^ Double.doubleToLongBits(yo));
+        return mix64(hash ^ Double.doubleToLongBits(zo));
     }
 
     private static double gradDot(long salt, int x, int y, int z, double dx, double dy, double dz) {

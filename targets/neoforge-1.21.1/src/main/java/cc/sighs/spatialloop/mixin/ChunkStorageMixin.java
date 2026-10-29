@@ -57,6 +57,10 @@ public abstract class ChunkStorageMixin implements LoopStorage, LoopStorageBarri
             return;
         }
         ChunkPos canonical = wrap(pos, radius);
+        if (canonical.equals(pos)) {
+            // canonical 位置无需平移，也不该为了一次读取深拷贝整块 NBT；交给原版读取。
+            return;
+        }
         cir.setReturnValue(this.worker.loadAsync(canonical).thenApply(optional -> optional.map(tag -> {
             CompoundTag copy = tag.copy();
             // canonical 空间 → 请求坐标空间；不要平移 IO 层持有的快照。
@@ -93,6 +97,11 @@ public abstract class ChunkStorageMixin implements LoopStorage, LoopStorageBarri
             return;
         }
         ChunkPos canonical = wrap(pos, radius);
+        if (canonical.equals(pos)) {
+            // canonical 写入不需要平移，也就不需要深拷贝；仍要跟踪真实 IO future 供交接屏障使用。
+            cir.setReturnValue(this.spatialloop$writes.submit(pos.toLong(), () -> this.worker.store(pos, tag)));
+            return;
+        }
         cir.setReturnValue(this.spatialloop$writes.submit(canonical.toLong(), () -> {
             CompoundTag copy = tag == null ? null : tag.copy();
             if (copy != null) {

@@ -29,7 +29,12 @@ public class SpatialLoopRadiusSlider extends AbstractSliderButton {
         if (raw <= 0) {
             valueText = Component.translatable("spatialloop.create.radius.off");
         } else {
-            valueText = Component.translatable("spatialloop.create.radius.value", raw, LoopGeometry.periodBlocks(raw));
+            valueText = Component.translatable(
+                    "spatialloop.create.radius.value",
+                    raw,
+                    LoopGeometry.periodBlocks(raw),
+                    LoopLoadingLimits.maxDistance(raw)
+            );
         }
         this.setMessage(Component.translatable("spatialloop.create.radius", valueText));
     }

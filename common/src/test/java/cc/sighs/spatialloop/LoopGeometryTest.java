@@ -82,9 +82,16 @@ class LoopGeometryTest {
     }
 
     @Test
-    void viewDistanceIsAlwaysStrictlyBelowRadius() {
-        for (int radius = LoopGeometry.MIN_ACTIVE_RADIUS; radius <= LoopGeometry.MAX_RADIUS; radius++) {
-            assertTrue(LoopGeometry.maxViewDistance(radius) < radius, "radius " + radius);
+    void wrapIsStableAcrossWholePeriods() {
+        for (int radius : new int[]{3, 16, 32, 128}) {
+            int period = LoopGeometry.periodChunks(radius);
+            for (int chunk = -1000; chunk <= 1000; chunk += 37) {
+                assertEquals(
+                        LoopGeometry.wrapChunk(chunk, radius),
+                        LoopGeometry.wrapChunk(chunk + period, radius),
+                        "radius " + radius + " chunk " + chunk
+                );
+            }
         }
     }
 }
