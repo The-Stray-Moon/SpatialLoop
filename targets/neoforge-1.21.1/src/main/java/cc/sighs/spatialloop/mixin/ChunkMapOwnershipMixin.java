@@ -112,12 +112,26 @@ public abstract class ChunkMapOwnershipMixin implements LoopGenerationAdmission 
                 ChunkHolder dependency = this.updatingChunkMap.get(absolute);
                 LoopChunkOwner old = this.spatialloop$owners.get(canonical);
                 if (old != null && old.holder() != dependency) {
-                    // managedBlock 不经过下一 tick 的 purgeStaleTickets。仅提前退休已完成同步读
-                    // 留下的 UNKNOWN 保温票据；仍在等待的请求和 PLAYER/FORCED 等真实需求不动。
-                    ((cc.sighs.spatialloop.world.LoopTransientTickets)
-                            ((ChunkMap) (Object) this).getDistanceManager())
-                            .retireCompletedRequests(old.holder().getPos());
-                    return spatialloop$defer(holder, status);
+                    var snapshot = this.spatialloop$ownership.snapshot(canonical);
+                    if (snapshot.isEmpty()) {
+                        // 协调器已释放，只是本地索引还没清；按无人持有继续申请。
+                        this.spatialloop$owners.remove(canonical, old);
+                        this.spatialloop$retiring.remove(canonical);
+                    } else if (old.token().absolute() == absolute && dependency != null
+                            && (snapshot.get().state() == LoopChunkOwnership.State.ACTIVE
+                            || this.spatialloop$ownership.cancelRetirement(old.token()))) {
+                        // 同一绝对坐标被重新 ticket（出生区 START 释放后玩家立刻登录、快速折返等）：
+                        // canonical 归属没变，重绑到新 holder，不能让它卡在旧 holder 的退休流程里。
+                        old.rebind(dependency);
+                        this.spatialloop$retiring.remove(canonical);
+                    } else {
+                        // managedBlock 不经过下一 tick 的 purgeStaleTickets。仅提前退休已完成同步读
+                        // 留下的 UNKNOWN 保温票据；仍在等待的请求和 PLAYER/FORCED 等真实需求不动。
+                        ((cc.sighs.spatialloop.world.LoopTransientTickets)
+                                ((ChunkMap) (Object) this).getDistanceManager())
+                                .retireCompletedRequests(old.holder().getPos());
+                        return spatialloop$defer(holder, status);
+                    }
                 }
                 if (dependency == null || !ChunkLevel.isLoaded(dependency.getTicketLevel())) {
                     return spatialloop$defer(holder, status);
@@ -259,11 +273,14 @@ public abstract class ChunkMapOwnershipMixin implements LoopGenerationAdmission 
             try {
                 unload.run();
                 int radius = LoopLevel.radiusOf(this.level);
-                if (radius > 0 && this.updatingChunkMap.get(position) != holder && this.pendingUnloads.get(position) != holder) {
+                // 只有这个绝对坐标当前没有 holder 时才算真正卸载。若玩家/票据在同一个 tick 里
+                // 已经重建了 holder（出生区 START 释放后立刻登录就是这样），不能标成 unloaded，
+                // 否则 owner 会停在 RETIRING，等一个永远不会到来的 HIDDEN。
+                if (radius > 0 && this.updatingChunkMap.get(position) == null) {
                     ChunkPos pos = holder.getPos();
                     long canonical = ChunkPos.asLong(LoopGeometry.wrapChunk(pos.x, radius), LoopGeometry.wrapChunk(pos.z, radius));
                     LoopChunkOwner owner = this.spatialloop$owners.get(canonical);
-                    if (owner != null && owner.holder() == holder) {
+                    if (owner != null && owner.token().absolute() == position) {
                         owner.markUnloaded();
                         this.spatialloop$retiring.putIfAbsent(canonical, owner);
                     }

@@ -65,7 +65,14 @@ gradle/target-conventions/       各 target 共用的发布/资源约定
    要塞只取第一个同心环位置折回（全部折回会过密）。
 8. **出生区不常驻**：`MinecraftServerMixin` 在 `prepareLevels` 结束后释放 `START` 票据。原版会让出生区
    永久加载，和它的同余副本同时存在时保存会互相覆盖。
-9. **已知限制**：玩家坐标不折回（不传送的直接后果）；`ForcedChunksSavedData`（`/forceload`）等按绝对坐标存。
+9. **球形弯折只改地形顶点**：`assets/minecraft/shaders/core/rendertype_{solid,cutout,cutout_mipped,translucent,tripwire}.vsh`
+   覆盖原版核心着色器，`Position + ChunkOffset` 是世界轴向的相机相对坐标，直接在 xz 上按
+   弧长弯球面。`CurveRadius` uniform 必须在对应 `.json` 里声明，并由 `ShaderInstanceCurveMixin`
+   在 `apply()` 里上传；不要把这套弯折套到 GUI/文字/手持物着色器上（它们没有 `ChunkOffset`，
+   `Position` 不是世界坐标）。实体/方块实体/粒子/云仍未弯折；要补的话需要在顶点着色器里用视图旋转
+   反推世界坐标。客户端拿不到存档半径，`SpatialLoopCurve` 是独立视觉参数（默认 256，
+   `-Dspatialloop.curveRadius` 覆盖）。
+10. **已知限制**：玩家坐标不折回（不传送的直接后果）；`ForcedChunksSavedData`（`/forceload`）等按绝对坐标存。
    运行时代码现于创建 `ChunkGenerationTask` / 取得 generation 引用前原子准入整个原版生成依赖范围；冲突时
    暂缓任务，旧 holder 走原版 `processUnloads`，实体与 POI 退休后等待区块/实体/POI 的真实写 future。
    r=16 的隔离 NeoForge 服务端已完成 A→B→C→A→B 五轮 `/forceload` 即时切换：remove 后紧接 add，
@@ -80,6 +87,10 @@ gradle/target-conventions/       各 target 共用的发布/资源约定
    忙等里反复调用，交接 pump 必须只做 O(待退休) 的小工作：不得每次扫全部 owner、不得每次重试全部
    pending（现为 20 ms 节流）。canonical 位置的区块/实体/POI 读写不要深拷贝 NBT（只有折回路径需要
    复制后平移）；`LoopNoise` 每样本不要重算 `Math.pow`，梯度盐必须缓存（`ImprovedNoiseSaltMixin`）。
+   旧 holder 卸载后同一绝对坐标可能在同一 tick 被重新 ticket（出生区 START 释放后玩家登录、快速折返）：
+   卸载观测必须确认该位置没有新 holder 才能标 `unloaded`；`admit` 遇到 owner 与 holder 不一致时，
+   若 absolute 相同且状态是 ACTIVE/RETIRING，要重绑到新 holder 并 `cancelRetirement`，只有 FLUSHING
+   才等写盘完成后重新申请。否则 owner 会停在 RETIRING 等一个永远不会到来的 HIDDEN。
    海底神殿读档时原版会按区块坐标重新生成 piece，副本布局可能与 canonical 略有差异。
    周期噪声用「晶格坐标 + `xo/yo/zo`」的自定义梯度哈希（原版 256 项排列表无法严格周期），
    所以地形是原版风格但不是原版逐块复刻：同一 seed 的地形与纯原版不同。

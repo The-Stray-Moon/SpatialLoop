@@ -45,6 +45,7 @@
   ],
   "client": [
     "CreateWorldScreenMixin",
+    "ShaderInstanceCurveMixin",
     "WorldCreationUiStateMixin",
     "WorldTabMixin"
   ],

@@ -43,6 +43,28 @@
 「11 格」这个钉死的常数，版本升级后如果原版生成依赖变大，会在加载存档时直接报错，而不是
 悄悄算小。客户端登录包/视距变更包用同一个上限，避免客户端按更大的渲染距离画出空洞。
 
+## 球形弯折（客户端 shader）
+
+地形顶点在着色器里真的按球面弯下去，水面、玻璃、植物一起弯：
+
+- 覆盖 `rendertype_solid` / `rendertype_cutout` / `rendertype_cutout_mipped` /
+  `rendertype_translucent` / `rendertype_tripwire` 五个核心着色器
+  （`targets/neoforge-1.21.1/src/main/resources/assets/minecraft/shaders/core/`），
+  只改 `.vsh` 的顶点位置和 `.json` 的 uniform 列表。
+- 顶点位置 `Position + ChunkOffset` 是「区块原点 − 相机位置」的**世界轴向**相机相对坐标
+  （`LevelRenderer.renderChunkLayer` 里 `uniform.set(origin - camera)`，`ModelViewMat` 只含视角旋转），
+  所以可以直接在 xz 平面上算：
+  `d = length(pos.xz)`，`θ = d / R`，`xz *= sin(θ)/θ`，`y -= R(1 - cos(θ))`。
+  这等于把平面按弧长铺到半径 R 的球面上：走一格还是一格，远处按球面下落。
+- `CurveRadius` 是自定义 uniform（JSON 里声明，默认 1e9 表示不弯），由
+  `ShaderInstanceCurveMixin` 在 `ShaderInstance#apply` 里上传。默认 **256 方块**，
+  用 `-Dspatialloop.curveRadius=512` 调整；`<= 1` 关闭。
+- 客户端拿不到存档里的循环半径（`ClientLevel` 不携带 `ChunkGenerator`），所以这是独立的视觉参数，
+  和半径 16/32 无关；半径越小星球越小、地平线越近。
+- **未弯折**：实体、方块实体、粒子、云、天空、手持物。它们没有 `ChunkOffset`，要先在顶点着色器里
+  用视图旋转反推世界坐标，当前版本没做；近距离（<20 格）偏差不到 1 格。
+- 交互/射线检测仍按平面世界计算；区块剔除也用平面包围盒。弯折只影响渲染。
+
 ## 实现要点
 
 | 层 | 位置 | 作用 |
@@ -91,6 +113,8 @@ placed feature 逐个放下去。唯一的改动是装饰种子用折回后的�
   这证明服务端即时请求与持久化路径可用，**不等同于玩家连续步行验收**，也未覆盖多人、实体/POI内容和 IO 失败。
   同余副本仍是不同内存对象；冲突或 IO/序列化失败可能拒绝/阻塞加载，
   请备份重要存档，暂不应将所有运行场景的数据持久化视为已验收。
+  出生区 START 票据释放后，玩家登录会在同一 tick 重新 ticket 同一批区块；旧 owner 必须在
+  “同 absolute 重新加载”时重绑并取消退休，否则会卡在加载 100%（已修复并有回归脚本）。
 - 原版 1.21.1 FULL 生成依赖圈半径为 11，循环世界最小半径现为 16（正好保证视距下限 2），
   新建世界默认 32（视距 18）；创建世界滑条会吸附到安全值，并显示该半径对应的最大视距。
   已有更小半径的存档明确报错，不自动更改其周期。视距上限完全由存档半径决定，
@@ -160,6 +184,17 @@ cd targets\neoforge-1.21.1
   `runGenerationTasks` 全量扫描 owner / 重试全部 pending 的问题），再降到 **840 tick**（噪声去掉
   每样本 `Math.pow`、缓存梯度盐）。同一轮去掉 canonical 读写时对整块 NBT 的深拷贝。
   日志：`.tmp/viewdist-r32-perf/logs/`、`.tmp/viewdist-r32-perf2/logs/`。
+- 球形弯折：dev 客户端启动到主菜单，`rendertype_solid` / `cutout` / `translucent` 均编译通过且
+  `CurveRadius` 的 GLSL location = 2，`SpatialLoopCurve.radius()` = 256；
+  `.tmp/shader-curve-check/logs/client.log`。另用同一视角的曲线/平面 A/B 截图验证顶点确实位移
+  （平均通道差 132/255，`.tmp/shader-visual-check/screenshots/`）。没有做真人长时间目视验收。
+- 新世界登录回归：用卡在 100% 的存档（overworld radius=32）复现 —— 登录时
+  `ServerPlayer.adjustSpawnLocation` 同步 `getChunk`，出生区 START 票据释放后同位置又被重新 ticket，
+  旧 owner 停在 RETIRING 等不到 HIDDEN，120 秒后报
+  `SpatialLoop handoff blocked ... owner [2,-2] ... state=RETIRING`。
+  修复（卸载观测只在该位置没有新 holder 时才标 unloaded；同一 absolute 重新加载时重绑 holder 并
+  取消 RETIRING）后，同一存档 `LOGIN_CHECK_ENTERED` / `LOGIN_CHECK_OK chunk=[0,0] hasChunk=true`。
+  日志：`.tmp/login-repro/logs/client.log`。
 - 未验证：真人客户端拖动视距；`radius=16` 存档的视距上限就是 2，无法通过任何客户端设置突破。
 - 存档/实体/POI 折回、视距/模拟距离、重启还原：沿用上一轮验证（本轮未改动这些路径）。
 - 未验证：真人拖动滑条、长时间行走的实际观感（需要实际操作客户端）。

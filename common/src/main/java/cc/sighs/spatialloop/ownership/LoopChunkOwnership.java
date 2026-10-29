@@ -132,6 +132,19 @@ public final class LoopChunkOwnership {
     }
 
     /**
+     * 同一个绝对坐标在退休完成前被重新加载：撤销 RETIRING，回到 ACTIVE。
+     * 只有尚未绑定保存屏障（FLUSHING）时允许；已开始写盘就必须等它完成再重新申请。
+     */
+    public synchronized boolean cancelRetirement(Token token) {
+        Owner owner = current(token);
+        if (owner == null || owner.state != State.RETIRING) {
+            return false;
+        }
+        owner.state = State.ACTIVE;
+        return true;
+    }
+
+    /**
      * 绑定真实保存完成屏障。成功回调才释放；异常或取消转 FAILED，保留原 owner。
      * token 过期或已绑定屏障时返回 false。完成回调也检查 generation token。
      */

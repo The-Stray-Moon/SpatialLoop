@@ -73,6 +73,25 @@ class LoopChunkOwnershipTest {
     }
 
     @Test
+    void reloadOfTheSameAbsoluteCanCancelRetirement() {
+        Claim a = claim(1, 101);
+        Token token = a.tokens().getFirst();
+        ownership.releaseDemand(a);
+        assertTrue(ownership.beginRetirement(token));
+        assertTrue(ownership.cancelRetirement(token));
+        assertEquals(State.ACTIVE, ownership.snapshot(1).orElseThrow().state());
+        // 退休取消后仍必须由同一 absolute 重新持有，别的副本不能抢。
+        assertTrue(ownership.claimRange(List.of(new Request(1, 201))).isEmpty());
+        Claim reacquired = ownership.claimRange(List.of(new Request(1, 101))).orElseThrow();
+        ownership.releaseDemand(reacquired);
+        assertTrue(ownership.beginRetirement(token));
+        // 一旦开始写盘就不允许取消。
+        assertTrue(ownership.flush(token, new CompletableFuture<>()));
+        assertFalse(ownership.cancelRetirement(token));
+        assertEquals(State.FLUSHING, ownership.snapshot(1).orElseThrow().state());
+    }
+
+    @Test
     void delayedSaveKeepsOwnerUntilEveryStoreCompletes() {
         Token token = retire(1, 101);
         CompletableFuture<Void> chunks = new CompletableFuture<>();
