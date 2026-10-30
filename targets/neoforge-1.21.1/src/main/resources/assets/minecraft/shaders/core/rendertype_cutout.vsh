@@ -31,7 +31,7 @@ out vec2 texCoord0;
  */
 vec3 spatialloop_bend(vec3 pos) {
     float d = length(pos.xz);
-    if (d < 1.0e-4 || CurveRadius <= 1.0) {
+    if (d < 1.0e-4 || abs(CurveRadius) <= 1.0) {
         return pos;
     }
     float theta = d / CurveRadius;

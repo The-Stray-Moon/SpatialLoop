@@ -90,7 +90,7 @@ dependencies {
 
 tasks.named('processResources', ProcessResources).configure {
     duplicatesStrategy = DuplicatesStrategy.EXCLUDE
-    // 元数据里有中文（mod_display_name 用 \\uXXXX 转义保存）：不显式指定的话 expand 走平台默认字符集，
+    // 元数据里的 mod_description 仍是中文（用 \uXXXX 转义保存）：不显式指定的话 expand 走平台默认字符集，
     // Windows 中文环境是 GBK，会把 UTF-8 读坏、写出非法 UTF-8，加载器解析 TOML 时直接失败。
     filteringCharset = 'UTF-8'
     def replaceProperties = [

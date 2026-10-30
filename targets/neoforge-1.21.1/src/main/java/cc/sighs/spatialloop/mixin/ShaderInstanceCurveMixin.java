@@ -22,5 +22,9 @@ public abstract class ShaderInstanceCurveMixin {
         if (uniform != null) {
             uniform.set(SpatialLoopCurve.radius());
         }
+        AbstractUniform viewRot = ((ShaderInstance) (Object) this).safeGetUniform("ViewRot");
+        if (viewRot != null) {
+            viewRot.set(SpatialLoopCurve.viewRotation());
+        }
     }
 }

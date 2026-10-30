@@ -45,24 +45,34 @@
 
 ## 球形弯折（客户端 shader）
 
-地形顶点在着色器里真的按球面弯下去，水面、玻璃、植物一起弯：
+地形和世界里的渲染物都在顶点着色器里按球面弯下去：
 
-- 覆盖 `rendertype_solid` / `rendertype_cutout` / `rendertype_cutout_mipped` /
-  `rendertype_translucent` / `rendertype_tripwire` 五个核心着色器
-  （`targets/neoforge-1.21.1/src/main/resources/assets/minecraft/shaders/core/`），
-  只改 `.vsh` 的顶点位置和 `.json` 的 uniform 列表。
-- 顶点位置 `Position + ChunkOffset` 是「区块原点 − 相机位置」的**世界轴向**相机相对坐标
-  （`LevelRenderer.renderChunkLayer` 里 `uniform.set(origin - camera)`，`ModelViewMat` 只含视角旋转），
-  所以可以直接在 xz 平面上算：
+- **地形**（`rendertype_solid` / `cutout` / `cutout_mipped` / `translucent` / `tripwire`）用资源覆盖
+  （`targets/neoforge-1.21.1/src/main/resources/assets/minecraft/shaders/core/`）。这些着色器的
+  `Position + ChunkOffset` 已经是「区块原点 − 相机位置」的世界轴向相机相对坐标
+  （`LevelRenderer.renderChunkLayer` 里 `uniform.set(origin - camera)`），直接在 xz 上算：
   `d = length(pos.xz)`，`θ = d / R`，`xz *= sin(θ)/θ`，`y -= R(1 - cos(θ))`。
-  这等于把平面按弧长铺到半径 R 的球面上：走一格还是一格，远处按球面下落。
-- `CurveRadius` 是自定义 uniform（JSON 里声明，默认 1e9 表示不弯），由
-  `ShaderInstanceCurveMixin` 在 `ShaderInstance#apply` 里上传。默认 **256 方块**，
-  用 `-Dspatialloop.curveRadius=512` 调整；`<= 1` 关闭。
-- 客户端拿不到存档里的循环半径（`ClientLevel` 不携带 `ChunkGenerator`），所以这是独立的视觉参数，
-  和半径 16/32 无关；半径越小星球越小、地平线越近。
-- **未弯折**：实体、方块实体、粒子、云、天空、手持物。它们没有 `ChunkOffset`，要先在顶点着色器里
-  用视图旋转反推世界坐标，当前版本没做；近距离（<20 格）偏差不到 1 格。
+- **实体、方块实体、粒子、拴绳、信标光柱、闪电、末地传送门、发光描边、碰撞箱、名字/文字**：
+  在 `ShaderInstance` 读取 GLSL 的地方统一注入（`SpatialLoopShaderPatch` +
+  `ShaderInstanceSourceMixin`），不需要复制原版资源。这些着色器没有 `ChunkOffset`，顶点位置先按原版
+  矩阵变换，再用视角旋转的转置还原成相机相对世界坐标：
+  `rel = transpose(V) * (ModelViewMat * Position)`，弯折后乘回 `V`。`ViewRot` 由
+  `SpatialLoopCurve.viewRotation()` 每帧上传（与 `GameRenderer.renderLevel` 的矩阵同源）。
+- 新增世界渲染类型只需把名字加进 `SpatialLoopShaderPatch` 的名单；源码结构与固定版本不符时原样跳过。
+- 文字着色器与 GUI 共用：用投影矩阵区分，`ProjMat[3][3] == 0`（透视）才弯折，GUI 的正交投影保持原样。
+  这条判定对**所有**注入的 shader 都生效：物品栏里的物品也是用 `rendertype_entity_*` 画的，
+  没有判定时它们的 GUI 坐标会被当成世界坐标下拉几十格，直接消失。
+- 弯折参数是**纯客户端配置** `config/spatialloop-client.toml`：
+  - `surface`：`OUTER_SURFACE`（球外表面，地形向下弯）/ `INNER_SURFACE`（球内表面，地形向上弯）/
+    `NONE`（不弯）；
+  - `strength`：曲率倍数（0.05–20），`有效半径 = 基准半径 / strength`，越大越弯；
+  - `adaptive`：基准半径跟随当前维度的循环半径，`R = 循环周期 / 2π`，走完一圈正好绕球一周；
+    该维度没有循环时回退到 256 格。
+  默认 `OUTER_SURFACE / 1.0 / false`，即 256 格球面。
+- 客户端拿不到存档里的循环半径（`ClientLevel` 不携带 `ChunkGenerator`），所以服务端在登录/换维度时
+  通过 `spatialloop:loop_radius` 载荷推送（只为循环维度发正数，下界/末地发 0）。
+- 内外表面用**带符号的半径**编码：正=向下弯，负=向上弯，`|R| <= 1` = 不弯。
+- **未弯折**：云、天空、GUI、物品栏 glint。它们要么是屏幕空间，要么需要独立的天空/云层处理。
 - 交互/射线检测仍按平面世界计算；区块剔除也用平面包围盒。弯折只影响渲染。
 
 ## 实现要点
@@ -185,9 +195,17 @@ cd targets\neoforge-1.21.1
   每样本 `Math.pow`、缓存梯度盐）。同一轮去掉 canonical 读写时对整块 NBT 的深拷贝。
   日志：`.tmp/viewdist-r32-perf/logs/`、`.tmp/viewdist-r32-perf2/logs/`。
 - 球形弯折：dev 客户端启动到主菜单，`rendertype_solid` / `cutout` / `translucent` 均编译通过且
-  `CurveRadius` 的 GLSL location = 2，`SpatialLoopCurve.radius()` = 256；
-  `.tmp/shader-curve-check/logs/client.log`。另用同一视角的曲线/平面 A/B 截图验证顶点确实位移
-  （平均通道差 132/255，`.tmp/shader-visual-check/screenshots/`）。没有做真人长时间目视验收。
+  `CurveRadius` 的 GLSL location = 2；`rendertype_entity_solid`、`particle`、`rendertype_text`
+  同时绑定 `CurveRadius` + `ViewRot`（location 1/13、1/10、1/10），注入的 30 余个世界着色器无编译失败；
+  `.tmp/shader-curve-check/logs/client.log`。另用同一视角的曲线/平面 A/B 截图验证地形顶点确实位移
+  （平均通道差 132/255，`.tmp/shader-visual-check/screenshots/`）。实体位移没有单独做像素级验收。
+- GUI 回归：物品栏物品也用 `rendertype_entity_*`，注入时必须用 `ProjMat[3][3] == 0`（透视）区分，
+  正交投影走原路径；`SpatialLoopShaderPatchTest`（4 项）钉住 guard、lines 改写和 JSON 幂等。
+  target 51 项测试通过。
+- 客户端配置/自适应：`config/spatialloop-client.toml` 生成 `surface` / `strength` / `adaptive` 三项；
+  隔离世界（循环半径 32）启用 `adaptive = true` 后，客户端收到 `spatialloop:loop_radius`，
+  `SpatialLoopCurve.radius()` = **162.97466** = 1024 / 2π。`LoopCurveMathTest`（4 项，common）覆盖
+  内外表面符号、强度缩放/钳制和无循环回退。日志：`.tmp/login-repro/logs/client.log`。
 - 新世界登录回归：用卡在 100% 的存档（overworld radius=32）复现 —— 登录时
   `ServerPlayer.adjustSpawnLocation` 同步 `getChunk`，出生区 START 票据释放后同位置又被重新 ticket，
   旧 owner 停在 RETIRING 等不到 HIDDEN，120 秒后报
