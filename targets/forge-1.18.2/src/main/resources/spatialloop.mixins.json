@@ -1,0 +1,50 @@
+{
+  "required": true,
+  "minVersion": "0.8.5",
+  "package": "cc.sighs.spatialloop.mixin",
+  "compatibilityLevel": "JAVA_17",
+  "refmap": "spatialloop.refmap.json",
+  "mixins": [
+    "BiomeManagerMixin",
+    "BiomeMixin",
+    "BlendedNoiseMixin",
+    "ChunkMapAccessor",
+    "ChunkMapMixin",
+    "ChunkStorageMixin",
+    "ClientboundLoginPacketMixin",
+    "ClientboundSetChunkCacheRadiusPacketMixin",
+    "DensityFunctionsNoiseMixin",
+    "DensityFunctionsShiftAMixin",
+    "DensityFunctionsShiftBMixin",
+    "DensityFunctionsShiftMixin",
+    "DensityFunctionsShiftedNoiseMixin",
+    "DensityFunctionsWeirdScaledSamplerMixin",
+    "DistanceManagerMixin",
+    "EntityStorageMixin",
+    "ImprovedNoiseSaltMixin",
+    "IOWorkerAccessor",
+    "MinecraftServerMixin",
+    "MultiNoiseBiomeSourceMixin",
+    "NoiseBasedCountPlacementMixin",
+    "NoiseRouterDataMixin",
+    "NoiseThresholdCountPlacementMixin",
+    "NormalNoiseMixin",
+    "PerlinNoiseAccessor",
+    "SectionStorageMixin",
+    "ServerChunkCacheMixin",
+    "ServerLevelMixin",
+    "SurfaceSystemMixin",
+    "WorldGenRegionMixin",
+    "WorldgenRandomMixin"
+  ],
+  "client": [
+    "CreateWorldScreenMixin",
+    "NoiseBasedChunkGeneratorAccessor",
+    "ScreenInvoker",
+    "ShaderInstanceCurveMixin",
+    "ShaderInstanceSourceMixin"
+  ],
+  "injectors": {
+    "defaultRequire": 1
+  }
+}

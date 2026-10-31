@@ -1,25 +1,43 @@
 # SpatialLoop 开发规范
 
 本仓库基于 [SighsTemple](https://github.com/Tower-of-Sighs/SighsTemple) 的
-`common + targets/<loader>-<minecraft-version>` 结构。当前只有一个 target：`neoforge-1.21.1`。
+`common + targets/<loader>-<minecraft-version>` 结构。主版本 target 是 `neoforge-1.21.1`；
+`fabric-1.21.1`、`neoforge-26.1`、`fabric-26.1` 已完成移植；
+`forge/fabric 1.20.1`、`forge 1.19.2`、`forge 1.18.2` 已完成核心移植
+（周期生成、区块/实体/POI 存档折回、视距、客户端弯折）；区块所有权交接目前只在这些
+1.21.1/26.1 target 上完整实现，旧版本待补。
 
 ## 架构边界
 
 ```text
-common/                          不依赖具体加载器/版本差异的共享源码与资源
-targets/neoforge-1.21.1/         入口、注册、Mixin、客户端界面、metadata
-gradle/target-conventions/       各 target 共用的发布/资源约定
+common/                         共享实现 + SPI（可引用跨版本稳定的 Minecraft 类型）
+targets/<loader>-<mc>/          加载器/版本具体实现：入口、配置、网络、Mixin、ChunkGenerator、资源
+gradle/target-conventions/      各 target 共用的发布/资源约定
 ```
 
-- `common` 放纯 Java 的周期几何（`LoopGeometry`）、交接基础组件（`LoopChunkOwnership`、
-  `LoopWriteBarrier`）和共享语言文件。这些代码不引用 Minecraft 类型，可以脱离游戏单独测试。
-  所有权协调器尚未接入票据/生成流程；存储 mixin 仅跟踪真实 IO future，不能据此宣称绕圈持久化已修复。
-- `targets/neoforge-1.21.1` 放所有 Minecraft / NeoForge 相关实现：`ChunkGenerator`、Mixin、注册与资源。
-  地形本身完全来自原版 `NoiseBasedChunkGenerator`（`SpatialLoopChunkGenerator extends NoiseBasedChunkGenerator`），
-  生物群系用原版 `multi_noise`，不要再写自有地形/生物群系/噪声模型。
-- 不要把 Minecraft 类型引入 `common` 的现有类；若将来移植到别的版本/加载器，按框架规则在 target 的
-  `prepareCommonSources` 里 `exclude` 有差异的 common 路径，并在 target 内提供实现。
-- 不写运行时版本判断来兼容多个版本；差异由各 target 的适配层承担。
+- `common` 放所有**已验证没有版本差异**的实现：周期几何与噪声数学（`LoopGeometry`、`LoopNoise`）、
+  交接协调器（`LoopChunkOwnership`、`LoopWriteBarrier`）、共享钩子接口、视距公式
+  （`LoopLoadingLimits`）、视距钳制（`SpatialLoopViewDistance`）、半径同步时机（`LoopRadiusSync`）。
+  这些代码可以引用 Minecraft 类型，但只限各 target 都存在的稳定 API；能脱离游戏测试的部分仍应保持纯 Java。
+- SPI 在 `common/src/main/java/cc/sighs/spatialloop/spi`：`SpatialLoopPlatform` 汇总
+  `LoopGenerationProfile`（生成依赖/持有 halo 常量）、`LoopNetworking`（载荷发送）、
+  `LoopServerContext`（当前服务器）、`LoopCurveSettings`（客户端弯折配置）。target 的加载器入口在构造期调用
+  `SpatialLoopServices.install(...)`；共同逻辑只依赖这些接口，不引用加载器 API。
+- `targets/neoforge-1.21.1` 是参考实现，放所有确认有版本/加载器差异的部分：NeoForge 入口与
+  `DeferredRegister`、`ModConfigSpec` 配置、NeoForge 网络、`SpatialLoopChunkGenerator`、Mixin、
+  `LoopChunkNbt`、shader 资源与客户端滑条。地形本身完全来自原版
+  `NoiseBasedChunkGenerator`，生物群系用原版 `multi_noise`，不要再写自有地形/生物群系/噪声模型。
+- `targets/fabric-1.21.1` 与主版本 MC 相同，只替换加载器层：Fabric 入口、Fabric Networking、
+  properties 客户端配置、`BuiltInRegistries.CHUNK_GENERATOR` 注册；因为原版
+  `NoiseBasedChunkGenerator` 在 Fabric 下是 final，target 用 access widener 的
+  `extendable class`，而 NeoForge/Forge 已由加载器补丁去掉 final。
+- 26.1 的 Minecraft 已非混淆，渲染管线换成纯 GLSL `RenderPipeline`：没有 shader JSON，也不支持普通
+  标量 uniform。`neoforge-26.1`/`fabric-26.1` 把弯折半径烘成 GLSL 常量，半径变化时清空管线缓存重编译
+  （`SpatialLoopShaderPatch.takeRecompileRequest`），不再上传 `CurveRadius`/`ViewRot`。26.1 还移除了
+  `ChunkStorage`（`ChunkMap` 直接继承 `SimpleRegionStorage`），chunk 折回并入 `SimpleRegionStorageMixin`。
+- 一个 common 文件只有在**所有** target 都能编译/运行时才留在 common；确认有差异时，在对应 target 的
+  `prepareCommonSources` 里 `exclude` 该路径，并在 target 内提供实现。不写运行时版本判断来兼容多版本。
+
 
 ## 关键约束
 
@@ -43,13 +61,14 @@ gradle/target-conventions/       各 target 共用的发布/资源约定
    generation settings 里的 placed feature，只把 `setDecorationSeed` 的坐标折回一个周期。不要改成
    自有装饰——那会把原版和其他模组注册的 feature 全部跳过。原版 feature 会读邻居区块、结果与生成顺序
    有关。存档折回使副本共用 canonical 槽位，但没有所有权交接，不能保证预读或同时生成的副本一致。
-3. **视距上限是 `半径 - 14`，不是 `半径 - 1`**：原版玩家票据等级是 31（ENTITY_TICKING），
+3. **视距上限是 `半径 - 14`，不是 `半径 - 1`**：1.21.1 的玩家票据等级是 31（ENTITY_TICKING），
    而 `ChunkLevel.MAX_LEVEL = 33 + FULL 生成依赖半径(11) = 44`；票据等级每向外一格 +1，
    持有圈比票据方形每边多 13 格。同余互斥要求 `2 × (视距 + 13) < 2r`，即 `视距 ≤ r - 14`
-   （`LoopLoadingLimits.maxDistance`）。服务端（`ChunkMap#setServerViewDistance`）、客户端
+   （`LoopLoadingLimits.maxDistance`）。这些数字由 target 的 `LoopGenerationProfile` 提供，
+   公式在 common；服务端（`ChunkMap#setServerViewDistance`）、客户端
    （登录包 / 视距变更包，`SpatialLoopViewDistance`）和模拟距离（`DistanceManagerMixin`）
    必须用同一个上限；客户端单独放宽只会画出没有区块的空洞，且会重新引入两份可写副本。
-   半径 16 → 视距 2，半径 32 → 18。`LoopLoadingLimits` 里的 11 由
+   半径 16 → 视距 2，半径 32 → 18。`LoopGenerationProfile` 里的 11 由
    `ChunkMapOwnershipMixin` 在加载循环维度时用 `LoopGenerationReach.forStatus(FULL)` 现场核对。
 4. **半径是存档属性**：由 `SpatialLoopChunkGenerator` 的 codec 保存在 level.dat，不要另建全局配置。
 5. **不要传送玩家**：跨过接缝时不做坐标折回/传送，玩家继续往外走即可。循环只由周期生成实现；
@@ -105,32 +124,49 @@ gradle/target-conventions/       各 target 共用的发布/资源约定
 
 ## 构建
 
-需要 JDK 21。target 是独立 Gradle 根工程：
+需要 JDK 21（26.1 target 需要 JDK 25）。common 可以单独构建；target 是独立 Gradle 根工程：
 
 ```powershell
 cd targets\neoforge-1.21.1
 .\gradlew.bat build
+
+cd targets\fabric-1.21.1
+.\gradlew.bat build
+
+# 共享源码单独编译/测试（当前以 NeoForge 1.21.1 为 classpath）
+.\gradlew.bat -p common build
 ```
 
-测试（周期不变量）：
+测试（周期不变量与 SPI 公式）：
 
 ```powershell
 cd targets\neoforge-1.21.1
 .\gradlew.bat test
 ```
 
+Fabric 的 `NoiseBasedChunkGenerator` 是 final，target 用
+`src/main/resources/spatialloop.accesswidener` 的 `extendable class` 打开继承；
+`ShaderInstance` 的构造器在 Fabric 上是 `(ResourceProvider, String, VertexFormat)`，
+NeoForge 另有 `ResourceLocation` 重载，两个 target 的 `ShaderInstanceSourceMixin` 因此不同。
+
+1.20.1 target 用 Java 17。Forge 的 Mixin 0.8.5 不支持在构造器内做 FIELD/HEAD/INVOKE 注入，
+`ServerLevel`/`ChunkMap`/`ServerChunkCache`/`RandomState` 的适配改为 `RETURN` 注入，并在构造期间
+直接读 `ChunkMap.generator`；Forge 开发运行由 `legacyForge { mixin { config 'spatialloop.mixins.json' } }`
+传入 `--mixin.config`，生产 jar 另用 `MANIFEST.MF` 的 `MixinConfigs`（refmap 尚未生成）。
+
 ## IDE
 
-- `common` 与 `targets/neoforge-1.21.1` 的 `rootProject.name` 分别是 `SpatialLoop-common` 与
-  `SpatialLoop-neoforge-1.21.1`；仓库根 `settings.gradle` 用 `includeBuild` 引入 target，
+- `common` 与各 target 的 `rootProject.name` 分别是 `SpatialLoop-common` 与
+  `SpatialLoop-<loader>-<mc>`；仓库根 `settings.gradle` 用 `includeBuild` 引入 target，
   因此打开根目录或直接打开 target 都能让 IDEA 看到两个模块。不要改回模板的名字。
-- IDEA 的 Gradle JVM 必须是 JDK 21；不要用 JDK 17 导入（moddev 会在同步时报错）。
+- IDEA 的 Gradle JVM 必须是 JDK 21；26.1 target 用 JDK 25。不要用 JDK 17 导入（moddev 会在同步时报错）。
 - `.idea/` 是本地状态，不提交；克隆后由 IDEA 按 `rootProject.name` 重新生成。
 
 ## 提交前检查
 
-- target 用 JDK 21 独立 `build` 通过，`test` 通过。
+- 每个 target 用对应 JDK 独立 `build` 通过，`test` 通过。
 - 改地形/噪声时确认 `LoopNoiseTest`（跨周期相等 + 接缝连续）与 `LoopGeometryTest` 仍然通过；
   必要时补充断言。用临时 world preset 起一次服务器，核对副本区块 `execute if blocks` 一致。
-- 改 Mixin 时确认注入点的方法签名仍与当前 NeoForge 版本一致（本项目固定 21.1.234）。
+- 改 Mixin 时确认注入点的方法签名仍与对应加载器/版本一致（主版本 NeoForge 固定 21.1.234）。
+- 改 SPI 时同步检查所有 target 的实现与 `SpatialLoopServices.install(...)` 调用顺序。
 - 不提交 `build/`、`.gradle/`、`run/`、本地 JDK 或反编译源码目录。

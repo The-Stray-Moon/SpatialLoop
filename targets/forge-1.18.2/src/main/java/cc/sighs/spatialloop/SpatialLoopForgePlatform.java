@@ -1,0 +1,71 @@
+package cc.sighs.spatialloop;
+
+import cc.sighs.spatialloop.client.SpatialLoopForgeCurveConfig;
+import cc.sighs.spatialloop.network.SpatialLoopForgeNetwork;
+import cc.sighs.spatialloop.spi.LoopCurveSettings;
+import cc.sighs.spatialloop.spi.LoopGenerationProfile;
+import cc.sighs.spatialloop.spi.LoopNetworking;
+import cc.sighs.spatialloop.spi.LoopServerContext;
+import cc.sighs.spatialloop.spi.SpatialLoopPlatform;
+import cc.sighs.spatialloop.world.LoopLevel;
+import net.minecraft.server.MinecraftServer;
+import net.minecraft.server.level.ServerLevel;
+import net.minecraftforge.server.ServerLifecycleHooks;
+
+/**
+ * Forge 1.18.2 的 SPI 实现。
+ *
+ * <p>1.18.2 的生成依赖参数与 1.20.1 相同：{@code ChunkStatus.maxDistance() = 12}，
+ * {@code ChunkMap.MAX_CHUNK_DISTANCE = 33 + 12 = 45}，玩家票据等级
+ * {@code DistanceManager.PLAYER_TICKET_LEVEL = 31}，所以 halo = 14、最小半径 = 17。
+ */
+final class SpatialLoopForgePlatform implements SpatialLoopPlatform {
+    static final SpatialLoopForgePlatform INSTANCE = new SpatialLoopForgePlatform();
+
+    private static final LoopGenerationProfile GENERATION_PROFILE = new LoopGenerationProfile() {
+        @Override
+        public int generationRadius() {
+            return 12;
+        }
+
+        @Override
+        public int loadedHaloRadius() {
+            return 14;
+        }
+    };
+
+    private static final LoopServerContext SERVER_CONTEXT = new LoopServerContext() {
+        @Override
+        public int overworldLoopRadius() {
+            MinecraftServer server = ServerLifecycleHooks.getCurrentServer();
+            if (server == null) {
+                return 0;
+            }
+            ServerLevel overworld = server.overworld();
+            return overworld == null ? 0 : LoopLevel.radiusOf(overworld);
+        }
+    };
+
+    private SpatialLoopForgePlatform() {
+    }
+
+    @Override
+    public LoopGenerationProfile generationProfile() {
+        return GENERATION_PROFILE;
+    }
+
+    @Override
+    public LoopNetworking networking() {
+        return SpatialLoopForgeNetwork::sendLoopRadius;
+    }
+
+    @Override
+    public LoopServerContext serverContext() {
+        return SERVER_CONTEXT;
+    }
+
+    @Override
+    public LoopCurveSettings curveSettings() {
+        return SpatialLoopForgeCurveConfig.INSTANCE;
+    }
+}

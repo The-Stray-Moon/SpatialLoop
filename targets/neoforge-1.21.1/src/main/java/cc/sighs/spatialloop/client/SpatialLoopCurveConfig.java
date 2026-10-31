@@ -1,6 +1,7 @@
 package cc.sighs.spatialloop.client;
 
 import cc.sighs.spatialloop.geometry.LoopCurveMath;
+import cc.sighs.spatialloop.spi.LoopCurveSettings;
 import net.neoforged.neoforge.common.ModConfigSpec;
 
 /**
@@ -15,7 +16,10 @@ import net.neoforged.neoforge.common.ModConfigSpec;
  * <p>循环半径是服务端存档属性，客户端通过 {@code LoopRadiusPayload} 收到；没收到或该维度
  * 没有循环时自适应回退到默认基准半径。
  */
-public final class SpatialLoopCurveConfig {
+public final class SpatialLoopCurveConfig implements LoopCurveSettings {
+    /** SPI 使用的单例；实际值仍由 NeoForge 的 config spec 提供。 */
+    public static final SpatialLoopCurveConfig INSTANCE = new SpatialLoopCurveConfig();
+
     private static final ModConfigSpec.Builder BUILDER = new ModConfigSpec.Builder();
 
     public static final ModConfigSpec.EnumValue<LoopCurveMath.Surface> SURFACE = BUILDER
@@ -47,15 +51,18 @@ public final class SpatialLoopCurveConfig {
     private SpatialLoopCurveConfig() {
     }
 
-    public static LoopCurveMath.Surface surface() {
+    @Override
+    public LoopCurveMath.Surface surface() {
         return SPEC.isLoaded() ? SURFACE.get() : LoopCurveMath.Surface.OUTER_SURFACE;
     }
 
-    public static double strength() {
+    @Override
+    public double strength() {
         return SPEC.isLoaded() ? STRENGTH.get() : 1.0;
     }
 
-    public static boolean adaptive() {
+    @Override
+    public boolean adaptive() {
         return SPEC.isLoaded() && ADAPTIVE.get();
     }
 }

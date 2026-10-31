@@ -13,13 +13,6 @@ public final class LoopGenerationReach {
     }
 
     public static int squareDependencyCount(int radius) {
-        if (radius < 0) {
-            throw new IllegalArgumentException("Generation dependency radius must not be negative: " + radius);
-        }
-        if (radius == 0) {
-            return 1;
-        }
-        int side = Math.addExact(Math.multiplyExact(radius, 2), 1);
-        return Math.multiplyExact(side, side);
+        return LoopDependencyMath.squareDependencyCount(radius);
     }
 }

@@ -1,7 +1,6 @@
 package cc.sighs.spatialloop.network;
 
 import cc.sighs.spatialloop.client.SpatialLoopCurve;
-import cc.sighs.spatialloop.world.LoopLevel;
 import net.minecraft.server.level.ServerPlayer;
 import net.neoforged.api.distmarker.Dist;
 import net.neoforged.bus.api.IEventBus;
@@ -15,6 +14,8 @@ import net.neoforged.neoforge.network.event.RegisterPayloadHandlersEvent;
  * 循环半径的服务端→客户端同步：客户端只在渲染时用，不参与世界数据。
  *
  * <p>登录和换维度时各发一次；服务端只为循环维度发正数，下界/末地发 0。
+ * 「什么时候发、发哪个半径」在 common 的 {@link LoopRadiusSync}；这里只保留 NeoForge 的
+ * payload 注册与发送实现。
  */
 public final class SpatialLoopNetwork {
     private SpatialLoopNetwork() {
@@ -41,18 +42,17 @@ public final class SpatialLoopNetwork {
 
     private static void onLoggedIn(PlayerEvent.PlayerLoggedInEvent event) {
         if (event.getEntity() instanceof ServerPlayer player) {
-            send(player);
+            LoopRadiusSync.send(player);
         }
     }
 
     private static void onChangedDimension(PlayerEvent.PlayerChangedDimensionEvent event) {
         if (event.getEntity() instanceof ServerPlayer player) {
-            send(player);
+            LoopRadiusSync.send(player);
         }
     }
 
-    private static void send(ServerPlayer player) {
-        int radius = LoopLevel.radiusOf(player.serverLevel());
+    public static void sendLoopRadius(ServerPlayer player, int radius) {
         PacketDistributor.sendToPlayer(player, new LoopRadiusPayload(radius));
     }
 }

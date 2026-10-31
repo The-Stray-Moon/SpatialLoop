@@ -2,6 +2,7 @@ package cc.sighs.spatialloop;
 
 import cc.sighs.spatialloop.client.SpatialLoopCurveConfig;
 import cc.sighs.spatialloop.network.SpatialLoopNetwork;
+import cc.sighs.spatialloop.spi.SpatialLoopServices;
 import cc.sighs.spatialloop.world.SpatialLoopChunkGenerator;
 import com.mojang.serialization.MapCodec;
 import net.minecraft.core.registries.Registries;
@@ -31,6 +32,7 @@ public final class SpatialLoopNeoForge121 {
             CHUNK_GENERATORS.register("periodic", () -> SpatialLoopChunkGenerator.CODEC);
 
     public SpatialLoopNeoForge121(IEventBus modEventBus, ModContainer modContainer) {
+        SpatialLoopServices.install(SpatialLoop121Platform.INSTANCE);
         CHUNK_GENERATORS.register(modEventBus);
         modContainer.registerConfig(ModConfig.Type.CLIENT, SpatialLoopCurveConfig.SPEC);
         SpatialLoopNetwork.register(modEventBus);

@@ -1,10 +1,10 @@
 // Standalone build for the shared source tree.
 //
-// common/ holds every piece of code that has no confirmed loader/version
-// difference. It MAY reference Minecraft and loader types: the split rule is
-// "a confirmed version difference", not "platform independence". It compiles
-// against the same legacyforge classpath as targets/forge-1.20.1, so it can be
-// built and tested on its own:
+// common/ holds the implementation that compiles unchanged for every target.
+// It MAY reference Minecraft and loader types: the split rule is "a confirmed
+// version difference", not "platform independence". It currently compiles
+// against the primary target (NeoForge 1.21.1), so it can be built and tested
+// on its own:
 //
 //     gradlew -p common build
 //
@@ -14,7 +14,7 @@
 // common files that do have a version difference.
 plugins {
     id 'java-library'
-    id 'net.neoforged.moddev.legacyforge' version '2.0.91'
+    id 'net.neoforged.moddev' version '2.0.141'
 }
 
 def properties = new Properties()
@@ -26,21 +26,37 @@ group = mod_group_id
 version = mod_version
 
 java {
-    toolchain.languageVersion = JavaLanguageVersion.of(17)
+    toolchain.languageVersion = JavaLanguageVersion.of(21)
 }
 
-legacyForge {
-    version = "${forge_minecraft_version}-${forge_version}"
+// Unit tests construct Minecraft NBT/BlockPos objects directly.
+sourceSets {
+    test {
+        compileClasspath += sourceSets.main.compileClasspath
+        runtimeClasspath += sourceSets.main.runtimeClasspath
+    }
+}
+
+neoForge {
+    version = neoforge_121_version
+
+    mods {
+        "${mod_id}" {
+            sourceSet(sourceSets.main)
+        }
+    }
 }
 
 repositories {
     mavenCentral()
+    mavenLocal()
 }
 
 dependencies {
     testImplementation platform('org.junit:junit-bom:5.10.2')
     testImplementation 'org.junit.jupiter:junit-jupiter'
     testRuntimeOnly 'org.junit.platform:junit-platform-launcher'
+    testImplementation 'com.google.code.gson:gson:2.10.1'
 }
 
 tasks.withType(JavaCompile).configureEach {

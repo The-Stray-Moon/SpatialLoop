@@ -1,6 +1,6 @@
 package cc.sighs.spatialloop.network;
 
-import cc.sighs.spatialloop.SpatialLoopNeoForge121;
+import cc.sighs.spatialloop.SpatialLoop;
 import io.netty.buffer.ByteBuf;
 import net.minecraft.network.codec.ByteBufCodecs;
 import net.minecraft.network.codec.StreamCodec;
@@ -15,7 +15,7 @@ import net.minecraft.resources.ResourceLocation;
  */
 public record LoopRadiusPayload(int radius) implements CustomPacketPayload {
     public static final CustomPacketPayload.Type<LoopRadiusPayload> TYPE = new CustomPacketPayload.Type<>(
-            ResourceLocation.fromNamespaceAndPath(SpatialLoopNeoForge121.MOD_ID, "loop_radius")
+            ResourceLocation.fromNamespaceAndPath(SpatialLoop.MOD_ID, "loop_radius")
     );
 
     public static final StreamCodec<ByteBuf, LoopRadiusPayload> STREAM_CODEC = StreamCodec.composite(
