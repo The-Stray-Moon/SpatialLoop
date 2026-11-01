@@ -41,6 +41,14 @@ def curseforgeProjectId = providers.provider { findProperty('publish_curseforge_
         .orElse(providers.environmentVariable('CURSEFORGE_PROJECT_ID'))
 def modrinthProjectId = providers.provider { findProperty('publish_modrinth_project_id')?.toString() }
         .orElse(providers.environmentVariable('MODRINTH_PROJECT_ID'))
+def curseforgeToken = providers.environmentVariable('CURSEFORGE_TOKEN')
+def modrinthToken = providers.environmentVariable('MODRINTH_TOKEN')
+
+def hasValue = { provider ->
+    provider.present && !provider.get().trim().isEmpty()
+}
+def curseforgeEnabled = providers.provider { hasValue(curseforgeProjectId) }
+def modrinthEnabled = providers.provider { hasValue(modrinthProjectId) }
 
 publishMods {
     file = publishFile
@@ -48,29 +56,40 @@ publishMods {
     type = STABLE
     modLoaders.add(publishLoader)
 
-    curseforge {
-        projectId = curseforgeProjectId
-        accessToken = providers.environmentVariable('CURSEFORGE_TOKEN')
-        minecraftVersions.add(publishMinecraftVersion)
-        client = true
-        server = true
+    // Only configure a platform when its project id is present. This keeps the
+    // task usable for a CurseForge-only or Modrinth-only release.
+    if (curseforgeEnabled.get()) {
+        curseforge {
+            projectId = curseforgeProjectId
+            accessToken = curseforgeToken
+            minecraftVersions.add(publishMinecraftVersion)
+            client = true
+            server = true
+        }
     }
 
-    modrinth {
-        projectId = modrinthProjectId
-        accessToken = providers.environmentVariable('MODRINTH_TOKEN')
-        minecraftVersions.add(publishMinecraftVersion)
+    if (modrinthEnabled.get()) {
+        modrinth {
+            projectId = modrinthProjectId
+            accessToken = modrinthToken
+            minecraftVersions.add(publishMinecraftVersion)
+        }
     }
 }
 
 tasks.named('publishMods').configure {
     doFirst {
-        def missing = [
-                'publish_curseforge_project_id (or CURSEFORGE_PROJECT_ID)': curseforgeProjectId,
-                'publish_modrinth_project_id (or MODRINTH_PROJECT_ID)'    : modrinthProjectId,
-                'CURSEFORGE_TOKEN'                                        : providers.environmentVariable('CURSEFORGE_TOKEN'),
-                'MODRINTH_TOKEN'                                          : providers.environmentVariable('MODRINTH_TOKEN')
-        ].findAll { _, value -> !value.present || value.get().trim().isEmpty() }.keySet()
+        def missing = []
+        if (!curseforgeEnabled.get() && !modrinthEnabled.get()) {
+            missing << 'publish_curseforge_project_id (or CURSEFORGE_PROJECT_ID) ' +
+                    'or publish_modrinth_project_id (or MODRINTH_PROJECT_ID)'
+        }
+        if (curseforgeEnabled.get() && !hasValue(curseforgeToken)) {
+            missing << 'CURSEFORGE_TOKEN'
+        }
+        if (modrinthEnabled.get() && !hasValue(modrinthToken)) {
+            missing << 'MODRINTH_TOKEN'
+        }
 
         if (!missing.isEmpty()) {
             throw new GradleException("Cannot publish mods; missing: ${missing.join(', ')}")
