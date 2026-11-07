@@ -1,224 +1,197 @@
-# 空间循环（SpatialLoop）
+# SpatialLoop
 
-一个 Minecraft NeoForge 1.21.1 模组：在创建世界时拉一个「空间循环区块半径」，让主世界变成一片
-**没有边界、不断重复同一段地形**的循环空间——即「鬼打墙 / 迷踪阵」。
+多加载器、多 Minecraft 版本的 Minecraft 模组工程。本 README 只描述代码架构、模块边界和构建方式，不介绍玩法内容。
 
 许可证：GPL-3.0。
 
-## 效果
+## 仓库结构
 
-- 半径内的空间东边接西边、南边接北边，地形、生物群系、植被逐块完全一致，没有断崖、没有生态错位。
-- 走到区域边缘**不会传送、不会跳坐标**：继续往外走，进入的是同一段地形的下一个周期，看起来永远走不到头。
-- **区块存档折回**：磁盘上的 region 文件只覆盖折回后的 `2r × 2r` 个区块；副本共用磁盘槽位，
-  方块实体、计划刻的绝对坐标会跟着平移。但尚不能保证绕圈时修改不丢失，见下方已知限制。
-- **实体与 POI 也折回**：实体区块、POI 区块的存档同样按周期折回，实体的 `Pos`、POI 记录的位置跟着平移；
-  这不等于内存副本实时同步，也没有跨副本的卸载保存屏障。
-- **原版结构照常生成**：村庄、要塞、前哨站、矿井、试炼密室、废弃传送门等都会出现；放置与生成用折回后的
-  canonical 区块坐标，生成后把结构 piece 平移到当前副本，结构起点/引用也随存档折回。`/locate` 和
-  末影之眼已适配。
-- 视距与模拟距离都有硬上限 `半径 - 14` 区块。这不是可调参数：原版在玩家票据范围外还会多持有
-  13 格生成依赖，视距再加这 13 格必须仍小于半径，否则同一份空间会同时存在两个可写副本。
-  半径 16 只能给到视距 2；想要视距 15 需要半径 ≥ 29，半径 32 给到 18。
-- 半径是**存档属性**：写进 `level.dat` 的维度生成器设置，换客户端、改配置都不会变。
+```text
+common/                         共享实现 + SPI
+targets/<loader>-<mc>/          加载器/版本具体实现
+gradle/target-conventions/      各 target 共用的资源与发布约定
+```
 
-## 视距为什么是「半径 - 14」
+每个 target 都是独立的 Gradle 根工程。根 `settings.gradle` 只把主 target `neoforge-1.21.1`
+作为 composite build 引入；其余 target 直接打开各自目录即可。
 
-上限来自原版的区块持有圈，不是保守余量：
+## 架构边界
 
-- 玩家加载/模拟票据的等级是 `ChunkLevel.byStatus(FullChunkStatus.ENTITY_TICKING) == 31`；
-- `ChunkLevel.MAX_LEVEL = 33 + FULL 生成依赖半径(11) = 44`，票据等级每向外一格 +1，
-  只要不超过 44 就仍有 holder 并会被生成；
-- 所以实际持有的方形范围比票据方形每边多 `44 - 31 = 13` 格。同余互斥要求
-  `2 × (视距 + 13) < 2r`，即 **视距 ≤ 半径 - 14**。
+### common
 
-| 半径 r | 周期（方块） | 最大视距（区块） |
+`common` 放所有**已验证没有版本差异**的实现：
+
+- 周期几何与噪声数学（`LoopGeometry`、`LoopNoise`、`LoopCurveMath` 等）；
+- 区块所有权协调器与写屏障（`LoopChunkOwnership`、`LoopWriteBarrier`）；
+- 视距公式（`LoopLoadingLimits`）、视距钳制（`SpatialLoopViewDistance`）、半径同步时机
+  （`LoopRadiusSync`）；
+- 客户端弯折计算（`SpatialLoopCurve`）；
+- 跨 target 的共享钩子接口；
+- `spi/` 下的平台抽象。
+
+`common` 可以引用 Minecraft 类型，但只限所有 target 都存在的稳定 API；能脱离游戏测试的部分保持纯 Java。
+
+### targets
+
+每个 target 只保留加载器或版本差异：
+
+- 加载器入口与生命周期注册；
+- 配置实现（NeoForge `ModConfigSpec`、Forge `ForgeConfigSpec`、Fabric properties）；
+- 网络实现（NeoForge/Fabric payload、Forge `SimpleChannel`）；
+- 版本相关的 `ChunkGenerator`；
+- Mixin（原版内部类/方法签名随版本变化）；
+- 存档 NBT 平移、gamerule/注册表/结构 API 适配；
+- metadata、access widener、shader 资源、客户端界面。
+
+### 源码共享
+
+target 不通过 Gradle 依赖引用 `common`，而是编译同一份源码：
+
+```groovy
+tasks.register('prepareCommonSources', Sync) {
+    from('../../common/src/main/java') {
+        exclude 'cc/sighs/spatialloop/world/LoopPositionalRandomFactory.java'
+    }
+    into "$buildDir/generated/common-main"
+}
+```
+
+- `common/src/main/java` 被同步到 `build/generated/common-main` 后参与 target 编译。
+- 确认有版本差异的 common 文件，在对应 target 的 `prepareCommonSources` 里 `exclude`，并在 target
+  内提供同路径实现。
+- `common/src/main/resources` 由 `gradle/target-conventions/publish.gradle` 加入 target 资源。
+- 不写运行时版本判断；版本差异由 target 的源码选择承担。
+
+### SPI
+
+SPI 位于 `common/src/main/java/cc/sighs/spatialloop/spi`：
+
+| 接口 | 作用 |
+| --- | --- |
+| `SpatialLoopPlatform` | 汇总 target 提供的运行时服务 |
+| `SpatialLoopServices` | 进程内安装/获取 `SpatialLoopPlatform` |
+| `LoopGenerationProfile` | 当前版本的生成依赖半径与 holder halo |
+| `LoopNetworking` | 半径同步的发送实现 |
+| `LoopServerContext` | 当前服务端/主世界查询 |
+| `LoopCurveSettings` | 客户端弯折配置读取 |
+
+target 的加载器入口在构造期调用 `SpatialLoopServices.install(...)`；共同逻辑只依赖这些接口，
+不引用加载器 API，也不直接依赖具体 target 类。
+
+## 分层职责
+
+| 层次 | 主要位置 | 说明 |
 | --- | --- | --- |
-| 16（最小） | 512 | 2 |
-| 24 | 768 | 10 |
-| 29 | 928 | 15 |
-| 32（新世界默认） | 1024 | 18 |
-| 46 | 1472 | 32（原版上限） |
+| 几何/数学 | `common/geometry` | 半径、周期、坐标折回、弯折半径换算 |
+| 噪声采样 | `common/world` + target Mixin | 周期以输入单位传递；各版本在 `NormalNoise`/`BlendedNoise` 等采样入口注入 |
+| 所有权 | `common/ownership` | 纯 Java 状态机，不操作 Minecraft 票据或存储 |
+| 存档 | target Mixin + `LoopChunkNbt` | 区块/实体/POI 读写时折回 canonical 槽位并平移绝对坐标 |
+| 生成 | target `SpatialLoopChunkGenerator` | 地形/群系沿用原版生成器，只适配结构、装饰、雕刻种子 |
+| 视距 | `common/world` + target Mixin | 服务端、客户端、模拟距离共用同一上限公式 |
+| 客户端渲染 | `common/client` + target Mixin/资源 | 世界空间 shader 的顶点改写与配置读取 |
+| 加载器胶水 | target 入口 | 注册、配置、网络、事件、metadata |
 
-`LoopLoadingLimits` 在循环维度构造时用 `LoopGenerationReach.forStatus(FULL)` 现场核对
-「11 格」这个钉死的常数，版本升级后如果原版生成依赖变大，会在加载存档时直接报错，而不是
-悄悄算小。客户端登录包/视距变更包用同一个上限，避免客户端按更大的渲染距离画出空洞。
+## Targets
 
-## 球形弯折（客户端 shader）
+| Target | Minecraft | 加载器 | Java | 说明 |
+| --- | --- | --- | --- | --- |
+| `neoforge-1.21.1` | 1.21.1 | NeoForge | 21 | 主参考实现，所有权交接完整 |
+| `fabric-1.21.1` | 1.21.1 | Fabric | 21 | 与主版本同 MC，仅加载器层不同 |
+| `neoforge-26.1` | 26.1 | NeoForge | 25 | 非混淆 API + 新渲染管线 |
+| `fabric-26.1` | 26.1 | Fabric | 25 | 与 NeoForge 26.1 同 MC |
+| `forge-1.20.1` | 1.20.1 | Forge | 17 | 旧存储/票据 API |
+| `fabric-1.20.1` | 1.20.1 | Fabric | 17 | 与 Forge 1.20.1 同 MC |
+| `forge-1.19.2` | 1.19.2 | Forge | 17 | 旧注册表/结构 API |
+| `forge-1.18.2` | 1.18.2 | Forge | 17 | 无 `RandomState`，API 差异最大 |
 
-地形和世界里的渲染物都在顶点着色器里按球面弯下去：
+当前状态：
 
-- **地形**（`rendertype_solid` / `cutout` / `cutout_mipped` / `translucent` / `tripwire`）用资源覆盖
-  （`targets/neoforge-1.21.1/src/main/resources/assets/minecraft/shaders/core/`）。这些着色器的
-  `Position + ChunkOffset` 已经是「区块原点 − 相机位置」的世界轴向相机相对坐标
-  （`LevelRenderer.renderChunkLayer` 里 `uniform.set(origin - camera)`），直接在 xz 上算：
-  `d = length(pos.xz)`，`θ = d / R`，`xz *= sin(θ)/θ`，`y -= R(1 - cos(θ))`。
-- **实体、方块实体、粒子、拴绳、信标光柱、闪电、末地传送门、发光描边、碰撞箱、名字/文字**：
-  在 `ShaderInstance` 读取 GLSL 的地方统一注入（`SpatialLoopShaderPatch` +
-  `ShaderInstanceSourceMixin`），不需要复制原版资源。这些着色器没有 `ChunkOffset`，顶点位置先按原版
-  矩阵变换，再用视角旋转的转置还原成相机相对世界坐标：
-  `rel = transpose(V) * (ModelViewMat * Position)`，弯折后乘回 `V`。`ViewRot` 由
-  `SpatialLoopCurve.viewRotation()` 每帧上传（与 `GameRenderer.renderLevel` 的矩阵同源）。
-- 新增世界渲染类型只需把名字加进 `SpatialLoopShaderPatch` 的名单；源码结构与固定版本不符时原样跳过。
-- 文字着色器与 GUI 共用：用投影矩阵区分，`ProjMat[3][3] == 0`（透视）才弯折，GUI 的正交投影保持原样。
-  这条判定对**所有**注入的 shader 都生效：物品栏里的物品也是用 `rendertype_entity_*` 画的，
-  没有判定时它们的 GUI 坐标会被当成世界坐标下拉几十格，直接消失。
-- 弯折参数是**纯客户端配置** `config/spatialloop-client.toml`：
-  - `surface`：`OUTER_SURFACE`（球外表面，地形向下弯）/ `INNER_SURFACE`（球内表面，地形向上弯）/
-    `NONE`（不弯）；
-  - `strength`：曲率倍数（0.05–20），`有效半径 = 基准半径 / strength`，越大越弯；
-  - `adaptive`：基准半径跟随当前维度的循环半径，`R = 循环周期 / 2π`，走完一圈正好绕球一周；
-    该维度没有循环时回退到 256 格。
-  默认 `OUTER_SURFACE / 1.0 / false`，即 256 格球面。
-- 客户端拿不到存档里的循环半径（`ClientLevel` 不携带 `ChunkGenerator`），所以服务端在登录/换维度时
-  通过 `spatialloop:loop_radius` 载荷推送（只为循环维度发正数，下界/末地发 0）。
-- 内外表面用**带符号的半径**编码：正=向下弯，负=向上弯，`|R| <= 1` = 不弯。
-- **未弯折**：云、天空、GUI、物品栏 glint。它们要么是屏幕空间，要么需要独立的天空/云层处理。
-- 交互/射线检测仍按平面世界计算；区块剔除也用平面包围盒。弯折只影响渲染。
+- 所有 target 都已迁移核心实现，可独立构建、测试并启动专用服务端。
+- 区块所有权交接（准入、写屏障、实体/POI 退休）目前只在 1.21.1/26.1 target 上完整实现；
+  1.20.1、1.19.2、1.18.2 是核心移植，缺少这层交接。
+- Forge 旧版本生产 jar 的 Mixin refmap 尚未生成；开发运行通过 `--mixin.config`，生产 jar 通过
+  `MANIFEST.MF` 的 `MixinConfigs` 加载配置。
 
-## 实现要点
+## 版本差异的处理方式
 
-| 层 | 位置 | 作用 |
-| --- | --- | --- |
-| 周期几何 | `common/.../geometry/LoopGeometry.java` | 半径 ↔ 周期（2r 区块 = 32r 方块）的换算与周期坐标 |
-| 周期噪声 | `targets/.../world/LoopNoise.java` | 原版 Perlin/NormalNoise 的周期重采样：晶格索引按 `cells = round(Q·f)` 取模，八度振幅/频率与原版一致 |
-| 噪声注入 | `.../mixin/{NormalNoise,PerlinNoiseAccessor,RandomState,BlendedNoise,DensityFunctions*,Aquifer,SurfaceSystem}Mixin` | 给每个 `NormalNoise` 盖上维度周期；各密度节点按自己的输入单位压入周期；`BlendedNoise`、含水层与地表缩放调用单独折回 |
-| 生成器 | `.../world/SpatialLoopChunkGenerator.java` | `extends NoiseBasedChunkGenerator`；地形/生物群系/洞穴/地表全走原版，本类只折回结构、装饰、雕刻种子 |
-| 生物群系 | 原版 `multi_noise` | 气候噪声同样周期化；`BiomeManager` 的模糊查找与 `BIOME_INFO_NOISE` 计数也按周期折回；`MultiNoiseBiomeSourceMixin` 把入口 quart 坐标折回，第三方群系模组（TerraBlender）的区域布局在副本间一致 |
-| 创建世界界面 | `.../mixin/{WorldTabMixin,WorldCreationUiStateMixin,CreateWorldScreenMixin}.java` | 滑条、状态、从原版 overworld 生成器取出 `biome_source`/`settings` 装配循环生成器 |
-| 视距 / 模拟距离 | `SpatialLoopViewDistance` + `LoopLoadingLimits` + `ChunkMapMixin` + `DistanceManagerMixin` + 数据包 mixin | 按 `半径 - 14` 统一收窄服务端加载/发送、客户端渲染（登录包与视距变更包）和模拟距离；数值由原版 `ChunkLevel` 的 holder 圈推导 |
-| 存档折回 | `ChunkStorageMixin` + `SimpleRegionStorageMixin` + `LoopChunkNbt` | 区块 / 实体 / POI 读写磁盘时按周期折回坐标，并平移方块实体、计划刻、实体位置、POI 记录、结构起点/引用 |
-| 结构 | `SpatialLoopChunkGenerator#createStructures` + `applyBiomeDecoration` | canonical 坐标判定与生成、piece 平移；`findNearestMapStructure` 在 canonical 空间搜索后平移到最近副本 |
+差异必须来自对应版本的源码核对，不能靠猜测：
 
-周期化的核心是「在采样底层换掉噪声」：同一个 `NormalNoise` 会被不同节点用不同缩放调用
-（`DensityFunctions.Noise` 传 `blockX·xzScale`、`ShiftNoise` 传 `blockX·0.25`、`SurfaceSystem` 有
-`x·1.28` 之类），所以周期以**输入单位**传递（`LoopNoisePeriod` 线程内栈），`NormalNoise#getValue`
-按 `Q` 做周期采样。`RandomState` 创建噪声时从当前维度的半径盖上默认方块周期，下界/末地没有周期，
-保持原版。`BlendedNoise`（`base_3d_noise`）不走 `NormalNoise`，用同一机制在 `compute` 里折回 x/z；
-含水层的格子坐标噪声、矿脉/地表抖动的按坐标随机工厂、`BiomeManager` 的模糊查找、雕刻器种子也都
-各自折回到同一个周期。
+- **1.21.1**：`ChunkStatus` 在 `chunk.status` 包；有 `ChunkPyramid`、`SimpleRegionStorage`、
+  `GenerationChunkHolder`。
+- **1.20.1**：`ChunkStatus` 回到 `chunk` 包；`ChunkMap extends ChunkStorage`；没有
+  `SimpleRegionStorage`/`GenerationChunkHolder`；Forge Mixin 0.8.5 不支持构造器内的
+  FIELD/HEAD/INVOKE 注入。
+- **1.19.2/1.18.2**：注册表静态字段、结构/装饰 API、`PositionalRandomFactory`、客户端 UI 均不同；
+  1.18.2 还没有 `RandomState`。
+- **26.1**：Minecraft 不再混淆；`ResourceLocation` → `Identifier`；`ChunkPos` 变成 record；
+  `CompoundTag` getter 返回 `Optional`；`ChunkStorage` 移除；渲染管线改为纯 GLSL `RenderPipeline`。
 
-原版 `ImprovedNoise` 的排列表只有 256 项，晶格数不是 256 的整数倍时接缝会断，所以 `LoopNoise`
-用「晶格坐标 + 该层 `xo/yo/zo`」重新做梯度哈希。结果是与原版同风格、同振幅的噪声，但不是原版逐块复刻。
+加载器层差异：
 
-装饰完全走原版 `applyBiomeDecoration`：按装饰步先放结构 piece，再把生物群系 generation settings 里的
-placed feature 逐个放下去。唯一的改动是装饰种子用折回后的区块原点（`setDecorationSeed`），
-所以同一块空间的所有副本拿到同一串随机数；feature 的落点仍然用真实区块原点，副本整体平移一个周期。
-原版和其他模组注册进生物群系的 feature 都会参与生成，不需要任何适配。
-
-原版 feature 会读邻居区块的方块状态、并按异步生成顺序落块，所以同一份区块**第一次生成**时结果可能
-依赖生成顺序。已保存的 canonical 数据可供后续副本读取，但副本可能提前读取或同时生成，
-当前实现不能仅凭存档折回保证内容一致。
-
-## 已知限制
-
-- 不做玩家传送（刻意如此）。因此**玩家坐标仍然连续增长**，F3 会看到很大的数字；折回的是区块存档坐标
-  与数据，不是玩家坐标——要让玩家坐标也跳回来，只能传送。
-- **同余区块卸载交接已接入运行时代码，并通过隔离循环维度的基础服务端存取回归。** 创建区块生成任务和取得
-  原版生成依赖引用前，协调器会原子申请整个依赖范围；冲突任务暂缓，旧 holder 走原版卸载流程，并在实体/POI
-  退休后等待区块、实体、POI 的真实存储 future。实体空区块缓存、POI section 缓存也在退休时失效。
-  NeoForge 1.21.1、radius=16（周期512方块）的隔离维度已通过五轮 A→B→C→A→B `/forceload` 即时切换：
-  remove 后紧接 add，不预先等待卸载、不在中途运行 `save-all`；同相位位置的竖直方块每轮增加 2 格至 10 格、
-  箱子物品每轮增加 1 件至 5 件，正常停服重启后均保留；上轮 4 个方块也经过重启核验。
-  同步等待期间会释放已完成请求留下的 UNKNOWN 临时保温票据，而非丢弃旧保存或移除玩家/强加载有效需求。
-  这证明服务端即时请求与持久化路径可用，**不等同于玩家连续步行验收**，也未覆盖多人、实体/POI内容和 IO 失败。
-  同余副本仍是不同内存对象；冲突或 IO/序列化失败可能拒绝/阻塞加载，
-  请备份重要存档，暂不应将所有运行场景的数据持久化视为已验收。
-  出生区 START 票据释放后，玩家登录会在同一 tick 重新 ticket 同一批区块；旧 owner 必须在
-  “同 absolute 重新加载”时重绑并取消退休，否则会卡在加载 100%（已修复并有回归脚本）。
-- 原版 1.21.1 FULL 生成依赖圈半径为 11，循环世界最小半径现为 16（正好保证视距下限 2），
-  新建世界默认 32（视距 18）；创建世界滑条会吸附到安全值，并显示该半径对应的最大视距。
-  已有更小半径的存档明确报错，不自动更改其周期。视距上限完全由存档半径决定，
-  **改 `server.properties` / 客户端视距都无法突破** `半径 - 14`。
-- 只替换主世界生成器；下界/末地保持原版。
-- 要塞：原版 128 个同心环位置全部折回区域内会变成「每个区块一个要塞」，所以只取第一个环位置折回成
-  **一个**要塞（副本按周期重复）。`/locate stronghold` 和末影之眼会指向最近的副本。
-- 海底神殿：原版读档时会按区块坐标强制重新生成内部 piece（`OceanMonumentStructure.regeneratePiecesAfterLoad`），
-  副本的布局可能与 canonical 那份略有差异。其他结构不受影响。
-- 只在新建世界时选择半径；已有存档需要重建世界才能启用。超平坦/调试世界不会被替换。
-- 世界高度、海平面沿用主世界默认值（-64 / 384 / 63）。
-## 在 IDEA 里打开
-
-两种方式都可以，推荐第一种：
-
-1. **直接打开 target（最省事）**：`File → Open` 选 `D:\work\SpatialLoop\targets\neoforge-1.21.1`。
-   `common` 会作为 composite build 自动导入成独立模块，同步后 Gradle 面板里能看到
-   `runClient` / `runServer`。
-2. **打开仓库根目录**：根 `settings.gradle` 已经把 target 作为 composite build 引入，
-   所以根项目 `SpatialLoop` 下同样能看到 `SpatialLoop-neoforge-1.21.1` 和 `SpatialLoop-common` 两个模块。
-
-注意 Gradle JVM 必须是 **JDK 21**（`Settings → Build, Execution, Deployment → Build Tools → Gradle →
-Gradle JVM`）。本项目已经把它设成 IDE 自带的 `jbrsdk_jcef-21`；换机器后如果提示找不到 JDK，
-改成任意 JDK 21 即可。
-
-如果窗口标题还显示旧的 `SighsTemple-...`（IDEA 会把项目名缓存在 `.idea/.name` 里），
-同步一次 Gradle，或者 `File → Rename Project` 改成 `SpatialLoop-neoforge-1.21.1`；
-也可以直接关掉项目、删除 `targets/neoforge-1.21.1/.idea` 后重新 Open，让 IDEA 按新的
-`rootProject.name` 重新生成。
+- Fabric 的原版 `NoiseBasedChunkGenerator` 是 final，用 access widener 的
+  `extendable class` 打开继承；Forge/NeoForge 由加载器补丁去掉 final。
+- Fabric 的 `ShaderInstance` 构造器是 `(ResourceProvider, String, VertexFormat)`；
+  NeoForge 另有 `ResourceLocation` 重载。
+- Forge 的 Mixin 配置通过 `legacyForge { mixin { config ... } }` 和 jar manifest 加载。
 
 ## 构建
 
-需要 JDK 21。每个 target 是独立的 Gradle 根工程：
+每个 target 独立构建：
 
 ```powershell
 cd targets\neoforge-1.21.1
 .\gradlew.bat build
 ```
 
-产物：`targets/neoforge-1.21.1/build/libs/SpatialLoop-neoforge-1.21.1-<version>.jar`。
+其他 target 同理，替换目录名即可。JDK 要求：
 
-`common/` 也可以单独编译（框架约定用 Forge 1.20.1 类路径）：
+| Target | JDK |
+| --- | --- |
+| 1.21.1 | Gradle JVM 21 |
+| 1.20.1 / 1.19.2 / 1.18.2 | Gradle JVM 21，toolchain 17 |
+| 26.1 | Gradle JVM / toolchain 25 |
+
+`common` 可以单独编译/测试（当前以 NeoForge 1.21.1 为 classpath）：
 
 ```powershell
 .\gradlew.bat -p common build
 ```
 
-## 验证记录
+测试：
 
-- `clean test build` 通过：`LoopGeometryTest`（5 个折回不变量）、`LoopChunkNbtTest`（4 个 NBT 平移）、
-  `LoopNoiseTest`（3 个周期噪声不变量：跨周期严格相等、接缝与普通相邻点同量级、值不退化）。
-- 临时 world preset（`spatialloop:periodic`，radius=32，seed=20251025）起专用服务器：
-  `forceload` 区块 `(100,100)` 与 `(164,100)`（相差一个周期 1024 格）后，
-  `execute if blocks` 的 y=-64..39 与 y=40..119 两段均 **Test passed**（26624 / 20480 个方块）。
-  另取 `(36,100)`、`(228,100)` 两个副本逐段比对，同样全部通过。
-- 接缝：`forceload` 区块 30..33，`save-all flush` 后离线解析 `run/world/region/*.mca`，对 z=1584..1615
-  逐列比较 x=511 与折回槽位里的 x=-512（即实际的 x=512）：最大高度差 **3**；32 列中 20 列为 0 或 1。
-  同一片区域普通相邻两列的最大高度差是 4（p95=2），所以接缝处没有额外断崖——
-  验收里「≤1」的字面阈值在这个种子下落在一处沙丘/陡坡上，未满足；这是地形坡度，不是接缝跳变。
-- 装饰/结构仍走原版流程：区块调色板里能看到全部原版矿石、草、树；结构生成与 `/locate` 沿用上一轮验证。
-- 视距：隔离的 `radius=32` 循环维度（周期 1024 方块）用 FakePlayer 请求视距 32，实际被压到
-  **18**（`半径 - 14`）；以玩家为中心 ±17 区块内确实已有 1090 个 FULL 区块（`getChunkNow` 只读已加载，
-  不触发加载）。沿 +X 连续步行 1024 方块（一个周期）后，起点放的 2 个方块在副本处恢复，再补 2 个；
-  再走 1024 方块后 4 个方块全部保留。日志：`.tmp/viewdist-r32-check2/logs/`。
-  这一轮同时修掉了实体退役条件过严（要求 EntitySectionStorage 为空）导致的交接卡死。
-- 生成速度：视距 18 的首屏 41×41 区块填满从 2120 tick 降到 **880 tick**（修掉 pump 每次
-  `runGenerationTasks` 全量扫描 owner / 重试全部 pending 的问题），再降到 **840 tick**（噪声去掉
-  每样本 `Math.pow`、缓存梯度盐）。同一轮去掉 canonical 读写时对整块 NBT 的深拷贝。
-  日志：`.tmp/viewdist-r32-perf/logs/`、`.tmp/viewdist-r32-perf2/logs/`。
-- 球形弯折：dev 客户端启动到主菜单，`rendertype_solid` / `cutout` / `translucent` 均编译通过且
-  `CurveRadius` 的 GLSL location = 2；`rendertype_entity_solid`、`particle`、`rendertype_text`
-  同时绑定 `CurveRadius` + `ViewRot`（location 1/13、1/10、1/10），注入的 30 余个世界着色器无编译失败；
-  `.tmp/shader-curve-check/logs/client.log`。另用同一视角的曲线/平面 A/B 截图验证地形顶点确实位移
-  （平均通道差 132/255，`.tmp/shader-visual-check/screenshots/`）。实体位移没有单独做像素级验收。
-- GUI 回归：物品栏物品也用 `rendertype_entity_*`，注入时必须用 `ProjMat[3][3] == 0`（透视）区分，
-  正交投影走原路径；`SpatialLoopShaderPatchTest`（4 项）钉住 guard、lines 改写和 JSON 幂等。
-  target 51 项测试通过。
-- 客户端配置/自适应：`config/spatialloop-client.toml` 生成 `surface` / `strength` / `adaptive` 三项；
-  隔离世界（循环半径 32）启用 `adaptive = true` 后，客户端收到 `spatialloop:loop_radius`，
-  `SpatialLoopCurve.radius()` = **162.97466** = 1024 / 2π。`LoopCurveMathTest`（4 项，common）覆盖
-  内外表面符号、强度缩放/钳制和无循环回退。日志：`.tmp/login-repro/logs/client.log`。
-- 新世界登录回归：用卡在 100% 的存档（overworld radius=32）复现 —— 登录时
-  `ServerPlayer.adjustSpawnLocation` 同步 `getChunk`，出生区 START 票据释放后同位置又被重新 ticket，
-  旧 owner 停在 RETIRING 等不到 HIDDEN，120 秒后报
-  `SpatialLoop handoff blocked ... owner [2,-2] ... state=RETIRING`。
-  修复（卸载观测只在该位置没有新 holder 时才标 unloaded；同一 absolute 重新加载时重绑 holder 并
-  取消 RETIRING）后，同一存档 `LOGIN_CHECK_ENTERED` / `LOGIN_CHECK_OK chunk=[0,0] hasChunk=true`。
-  日志：`.tmp/login-repro/logs/client.log`。
-- 未验证：真人客户端拖动视距；`radius=16` 存档的视距上限就是 2，无法通过任何客户端设置突破。
-- 存档/实体/POI 折回、视距/模拟距离、重启还原：沿用上一轮验证（本轮未改动这些路径）。
-- 未验证：真人拖动滑条、长时间行走的实际观感（需要实际操作客户端）。
+```powershell
+cd targets\neoforge-1.21.1
+.\gradlew.bat test
+```
 
-## 框架
+发布：
 
-基于 [Tower-of-Sighs/SighsTemple](https://github.com/Tower-of-Sighs/SighsTemple) 的
-`common + targets/<loader>-<mc-version>` 结构。共享代码放在 `common`，加载器/版本专属代码、
-Mixin、metadata 放在 target。
+```powershell
+cd targets\<loader>-<mc>
+.\gradlew.bat publishMods
+```
+
+发布约定在 `gradle/target-conventions/publish.gradle`：按 target 选择 `remapJar`/`reobfJar`/`jar`
+作为产物；CurseForge 项目 ID 在根 `gradle.properties`，Modrinth 仅在提供项目 ID 与 token 时启用。
+
+## 新增 target
+
+1. 复制现有 target 的 `build.gradle`、`settings.gradle`、`gradle.properties`、`ci.properties`。
+2. 在 `prepareCommonSources` 中登记该版本的 common 排除项，并在 target 内实现同路径类。
+3. 实现加载器入口和 `SpatialLoopPlatform`，在构造期安装 SPI。
+4. 按对应版本源码移植 Mixin、`ChunkGenerator`、存档 NBT 与客户端实现。
+5. 补齐 metadata、mixin 配置、access widener 和资源。
+6. 运行 `build`、`test`、`runServer`，确认 `Done` 且无 Mixin apply 错误。
+
+## IDE
+
+- 推荐直接打开 `targets/<loader>-<mc>`；`common` 会作为 composite build 导入。
+- 也可以打开仓库根目录；当前根 `settings.gradle` 只引入主 target。
+- Gradle JVM：1.21.1/1.20.1/1.19.2/1.18.2 用 JDK 21；26.1 用 JDK 25。
+
+## 架构限制
+
+- `common` 是源码共享，不是二进制库；每个 target 仍要单独编译和测试。
+- Mixin 必须按版本维护，不能共享注入点字符串。
+- 所有权交接尚未覆盖旧版本 target。
+- Forge 生产 jar 的 Mixin refmap 尚未接入。
